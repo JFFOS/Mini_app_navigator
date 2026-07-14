@@ -1,0 +1,87 @@
+"""Persistent configuration for Mini App Navigator.
+
+Stores the list of registered mini programs in a JSON file under the user's
+home directory so it survives restarts and lives outside the project tree.
+"""
+
+import json
+import os
+import uuid
+from dataclasses import dataclass, asdict, field
+from typing import List, Optional
+
+CONFIG_DIR = os.path.expanduser("~/.mini_app_navigator")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+LOG_DIR = os.path.join(CONFIG_DIR, "logs")
+
+# Program kinds
+KIND_PYTHON = "python"   # run a .py file with the current interpreter
+KIND_SHELL = "shell"     # run an arbitrary shell command / open an app
+
+
+@dataclass
+class Program:
+    """A single registered mini program."""
+    name: str
+    kind: str                       # KIND_PYTHON or KIND_SHELL
+    target: str                     # path to .py file, or shell command
+    args: str = ""                  # extra arguments (space separated)
+    cwd: str = ""                   # working directory (optional)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Program":
+        return Program(
+            id=d.get("id") or uuid.uuid4().hex[:8],
+            name=d.get("name", "Untitled"),
+            kind=d.get("kind", KIND_SHELL),
+            target=d.get("target", ""),
+            args=d.get("args", ""),
+            cwd=d.get("cwd", ""),
+        )
+
+    def log_path(self) -> str:
+        return os.path.join(LOG_DIR, f"{self.id}.log")
+
+
+class Config:
+    """Loads and saves the list of programs."""
+
+    def __init__(self):
+        self.programs: List[Program] = []
+        self._ensure_dirs()
+        self.load()
+
+    def _ensure_dirs(self):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        os.makedirs(LOG_DIR, exist_ok=True)
+
+    def load(self):
+        if not os.path.exists(CONFIG_PATH):
+            self.programs = []
+            return
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                data = json.load(f)
+            self.programs = [Program.from_dict(d) for d in data.get("programs", [])]
+        except (json.JSONDecodeError, OSError):
+            self.programs = []
+
+    def save(self):
+        self._ensure_dirs()
+        with open(CONFIG_PATH, "w") as f:
+            json.dump({"programs": [p.to_dict() for p in self.programs]}, f, indent=2)
+
+    def add(self, program: Program):
+        self.programs.append(program)
+        self.save()
+
+    def remove(self, program_id: str):
+        self.programs = [p for p in self.programs if p.id != program_id]
+        self.save()
+
+    def get(self, program_id: str) -> Optional[Program]:
+        return next((p for p in self.programs if p.id == program_id), None)
