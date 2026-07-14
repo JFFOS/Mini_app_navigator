@@ -13,6 +13,9 @@ from typing import List, Optional
 CONFIG_DIR = os.path.expanduser("~/.mini_app_navigator")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 LOG_DIR = os.path.join(CONFIG_DIR, "logs")
+# Tracks PIDs of launched programs so they can be re-adopted after the app
+# quits and reopens (programs keep running when the menu bar app exits).
+RUNNING_PATH = os.path.join(CONFIG_DIR, "running.json")
 
 # Program kinds
 KIND_PYTHON = "python"   # run a .py file with the current interpreter

@@ -19,6 +19,59 @@ from process_manager import ProcessManager
 LOG_TAIL_BYTES = 40_000
 
 
+def _read_log_tail(prog: Program) -> str:
+    if not os.path.exists(prog.log_path()):
+        return "(no output yet)"
+    with open(prog.log_path(), "rb") as f:
+        try:
+            f.seek(-LOG_TAIL_BYTES, os.SEEK_END)
+        except OSError:
+            f.seek(0)
+        return f.read().decode("utf-8", "replace")
+
+
+def _log_page(prog: Program) -> str:
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(prog.name)} — Logs</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  html, body {{ height: 100%; margin: 0; }}
+  body {{ display:flex; flex-direction:column; font-family: -apple-system, system-ui, sans-serif;
+         background: Canvas; color: CanvasText; }}
+  header {{ padding: 12px 18px; border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+           display:flex; align-items:center; gap:10px; }}
+  header h1 {{ font-size: 15px; margin: 0; font-weight: 620; }}
+  .live {{ font-size: 11px; color:#1f8f4d; display:flex; align-items:center; gap:6px; }}
+  .dot {{ width:8px; height:8px; border-radius:50%; background:#1f8f4d; animation: pulse 1.4s infinite; }}
+  @keyframes pulse {{ 0%,100%{{opacity:1}} 50%{{opacity:.3}} }}
+  pre {{ flex:1; overflow:auto; margin:0; padding: 14px 18px; font-family: ui-monospace, monospace;
+        font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }}
+</style></head>
+<body>
+<header><h1>{html.escape(prog.name)}</h1>
+  <span class="live"><span class="dot"></span>live</span></header>
+<pre id="log">loading…</pre>
+<script>
+  const id = {json.dumps(prog.id)};
+  const pre = document.getElementById('log');
+  async function tick() {{
+    try {{
+      const r = await fetch('/lograw?id=' + encodeURIComponent(id));
+      const t = await r.text();
+      const atBottom = Math.abs(pre.scrollHeight - pre.scrollTop - pre.clientHeight) < 50;
+      pre.textContent = t;
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    }} catch (e) {{}}
+  }}
+  tick();
+  setInterval(tick, 1500);
+</script>
+</body></html>"""
+
+
 def _page(config: Config, procs: ProcessManager) -> str:
     rows = []
     for p in config.programs:
@@ -209,18 +262,22 @@ class DashboardServer:
                 elif parsed.path == "/log":
                     qs = parse_qs(parsed.query)
                     prog = server.config.get(qs.get("id", [""])[0])
-                    text = "Program not found."
-                    if prog and os.path.exists(prog.log_path()):
-                        with open(prog.log_path(), "rb") as f:
-                            try:
-                                f.seek(-LOG_TAIL_BYTES, os.SEEK_END)
-                            except OSError:
-                                f.seek(0)
-                            text = f.read().decode("utf-8", "replace")
-                    elif prog:
-                        text = "(no output yet)"
+                    if prog is None:
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    body = _log_page(prog).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif parsed.path == "/lograw":
+                    qs = parse_qs(parsed.query)
+                    prog = server.config.get(qs.get("id", [""])[0])
+                    text = _read_log_tail(prog) if prog else "Program not found."
                     self.send_response(200)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
                     self.end_headers()
                     self.wfile.write(text.encode("utf-8"))
                 else:
@@ -257,7 +314,18 @@ class DashboardServer:
                     self.send_response(404)
                     self.end_headers()
 
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        # Try a small range so a busy port (e.g. another instance) doesn't
+        # crash the whole app; self.port is updated to the one we bind.
+        last_err = None
+        for candidate in range(self.port, self.port + 10):
+            try:
+                self._httpd = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
+                self.port = candidate
+                break
+            except OSError as e:
+                last_err = e
+        if self._httpd is None:
+            raise last_err
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
 

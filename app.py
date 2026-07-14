@@ -7,7 +7,6 @@ opened from the menu. The program list is persisted to
 ~/.mini_app_navigator/config.json.
 """
 
-import subprocess
 import webbrowser
 
 import rumps
@@ -15,6 +14,7 @@ import rumps
 from config import Config, Program, KIND_PYTHON
 from process_manager import ProcessManager
 from dashboard import DashboardServer
+import login_item
 
 REFRESH_SECONDS = 3
 
@@ -48,9 +48,12 @@ class MiniAppNavigator(rumps.App):
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open Dashboard…", callback=self.on_dashboard))
+        login = rumps.MenuItem("Launch at Login", callback=self.on_toggle_login)
+        login.state = 1 if login_item.is_enabled() else 0
+        items.append(login)
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Refresh", callback=lambda _: self._refresh(None)))
-        items.append(rumps.MenuItem("Quit", callback=self.on_quit))
+        items.append(rumps.MenuItem("Quit (programs keep running)", callback=self.on_quit))
         self.menu = items
 
     def _program_menu(self, program: Program) -> rumps.MenuItem:
@@ -90,22 +93,32 @@ class MiniAppNavigator(rumps.App):
 
     def _make_view_log(self, program: Program):
         def cb(_):
-            subprocess.Popen(["open", program.log_path()])
+            # Live-updating log page in the browser (auto-tails).
+            webbrowser.open(self.dashboard.url + f"log?id={program.id}")
         return cb
 
     def on_dashboard(self, _):
         webbrowser.open(self.dashboard.url)
 
+    def on_toggle_login(self, sender):
+        if login_item.is_enabled():
+            login_item.disable()
+            sender.state = 0
+        else:
+            login_item.enable()
+            sender.state = 1
+
     def on_quit(self, _):
-        self.procs.stop_all()
+        # Leave launched programs running so they can be re-adopted next time.
         self.dashboard.stop()
         rumps.quit_application()
 
     # ---------- periodic refresh ----------
 
     def _refresh(self, _):
-        # Rebuild so checkmarks / Launch-vs-Stop and any dashboard-side
-        # add/remove are reflected in the menu.
+        # Reap finished children, then rebuild so checkmarks / Launch-vs-Stop
+        # and any dashboard-side add/remove are reflected in the menu.
+        self.procs.reap()
         self._build_menu()
 
 
