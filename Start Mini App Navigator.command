@@ -4,7 +4,8 @@
 
 cd "$(dirname "$0")" || exit 1
 
-PYTHON="$(command -v python3)"
+# Prefer the project's conda env if available; fall back to whatever python3 is on PATH.
+PYTHON="$(conda run -n Mini_app_navigator which python3 2>/dev/null)"
 [ -x "$PYTHON" ] || PYTHON="$(command -v python3)"
 
 # Start detached so the app keeps running after this terminal window closes.
