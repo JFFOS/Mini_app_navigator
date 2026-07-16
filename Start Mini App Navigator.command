@@ -4,8 +4,10 @@
 
 cd "$(dirname "$0")" || exit 1
 
-# Prefer the project's conda env if available; fall back to whatever python3 is on PATH.
-PYTHON="$(conda run -n Mini_app_navigator which python3 2>/dev/null)"
+# Read the interpreter from the local, gitignored config if present
+# (copy launcher.local.example -> launcher.local). Fall back to python3 on PATH.
+PYTHON=""
+[ -f "launcher.local" ] && . "./launcher.local"
 [ -x "$PYTHON" ] || PYTHON="$(command -v python3)"
 
 # Start detached so the app keeps running after this terminal window closes.

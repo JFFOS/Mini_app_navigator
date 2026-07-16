@@ -1,0 +1,13 @@
+# Local launcher config — copy this file to "launcher.local" (which is
+# gitignored) and set PYTHON to the interpreter that has this project's
+# dependencies (rumps) installed. The .command launchers source it.
+#
+# If you skip this, the launcher falls back to whatever `python3` is on PATH.
+#
+# Conda env example:
+#   PYTHON="$HOME/anaconda3/envs/Mini_app_navigator/bin/python3"
+#
+# venv example:
+#   PYTHON="$(pwd)/.venv/bin/python3"
+
+PYTHON=""
