@@ -25,9 +25,10 @@ class MiniAppNavigator(rumps.App):
         self.config = Config()
         self.procs = ProcessManager()
         # The dashboard shares these exact instances, so menu and web UI stay
-        # in sync automatically.
+        # in sync automatically. It is started lazily (on first open) so the
+        # HTTP server thread + socket cost nothing unless actually used.
         self.dashboard = DashboardServer(self.config, self.procs)
-        self.dashboard.start()
+        self._last_sig = None
         self._build_menu()
         # Periodically refresh running indicators + pick up dashboard changes.
         self._timer = rumps.Timer(self._refresh, REFRESH_SECONDS)
@@ -35,7 +36,16 @@ class MiniAppNavigator(rumps.App):
 
     # ---------- menu construction ----------
 
+    def _signature(self):
+        """Cheap fingerprint of what the menu displays, so periodic refreshes
+        can skip rebuilding (and re-allocating MenuItems) when nothing changed."""
+        return tuple(
+            (p.id, p.name, p.target, self.procs.is_running(p.id))
+            for p in self.config.programs
+        )
+
     def _build_menu(self):
+        self._last_sig = self._signature()
         self.menu.clear()
         items = []
         if not self.config.programs:
@@ -94,10 +104,12 @@ class MiniAppNavigator(rumps.App):
     def _make_view_log(self, program: Program):
         def cb(_):
             # Live-updating log page in the browser (auto-tails).
+            self.dashboard.ensure_started()
             webbrowser.open(self.dashboard.url + f"log?id={program.id}")
         return cb
 
     def on_dashboard(self, _):
+        self.dashboard.ensure_started()
         webbrowser.open(self.dashboard.url)
 
     def on_toggle_login(self, sender):
@@ -116,10 +128,12 @@ class MiniAppNavigator(rumps.App):
     # ---------- periodic refresh ----------
 
     def _refresh(self, _):
-        # Reap finished children, then rebuild so checkmarks / Launch-vs-Stop
-        # and any dashboard-side add/remove are reflected in the menu.
+        # Reap finished children, then rebuild only when something the menu
+        # shows actually changed (running state, or a dashboard-side add/remove).
+        # Skipping the no-op rebuild avoids constant MenuItem re-allocation.
         self.procs.reap()
-        self._build_menu()
+        if self._signature() != self._last_sig:
+            self._build_menu()
 
 
 if __name__ == "__main__":

@@ -225,7 +225,13 @@ class DashboardServer:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
 
-    def start(self):
+    def ensure_started(self):
+        """Start the HTTP server on first use.
+
+        Called lazily (when the dashboard or a log page is opened) instead of at
+        app startup, so the server thread + socket cost nothing until needed.
+        Idempotent: safe to call on every open.
+        """
         if self._httpd is not None:
             return
         server = self  # capture for the handler
