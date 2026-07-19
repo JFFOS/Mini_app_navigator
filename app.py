@@ -7,6 +7,10 @@ opened from the menu. The program list is persisted to
 ~/.mini_app_navigator/config.json.
 """
 
+import os
+import shlex
+import subprocess
+import sys
 import webbrowser
 
 import rumps
@@ -63,6 +67,7 @@ class MiniAppNavigator(rumps.App):
         items.append(login)
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Refresh", callback=lambda _: self._refresh(None)))
+        items.append(rumps.MenuItem("Restart Navigator", callback=self.on_restart_self))
         items.append(rumps.MenuItem("Quit (programs keep running)", callback=self.on_quit))
         self.menu = items
 
@@ -73,6 +78,7 @@ class MiniAppNavigator(rumps.App):
 
         if running:
             parent.add(rumps.MenuItem("Stop", callback=self._make_stop(program)))
+            parent.add(rumps.MenuItem("Restart", callback=self._make_restart(program)))
         else:
             parent.add(rumps.MenuItem("Launch", callback=self._make_launch(program)))
         parent.add(rumps.MenuItem("View Log", callback=self._make_view_log(program)))
@@ -101,6 +107,14 @@ class MiniAppNavigator(rumps.App):
             self._build_menu()
         return cb
 
+    def _make_restart(self, program: Program):
+        def cb(_):
+            err = self.procs.restart(program)
+            if err:
+                rumps.alert(f"Could not restart “{program.name}”", err)
+            self._build_menu()
+        return cb
+
     def _make_view_log(self, program: Program):
         def cb(_):
             # Live-updating log page in the browser (auto-tails).
@@ -119,6 +133,32 @@ class MiniAppNavigator(rumps.App):
         else:
             login_item.enable()
             sender.state = 1
+
+    def on_restart_self(self, _):
+        """Relaunch the menu bar app itself, leaving launched programs running.
+
+        The replacement is spawned detached and waits a moment before starting,
+        so this instance has released its menu bar item and dashboard port
+        first. Running programs are re-adopted from running.json on startup.
+        """
+        script = os.path.abspath(sys.argv[0])
+        try:
+            subprocess.Popen(
+                [
+                    "/bin/sh", "-c",
+                    f"sleep 1; exec {shlex.quote(sys.executable)} {shlex.quote(script)}",
+                ],
+                cwd=os.path.dirname(script) or None,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as e:
+            rumps.alert("Could not restart Mini App Navigator", str(e))
+            return
+        self.dashboard.stop()
+        rumps.quit_application()
 
     def on_quit(self, _):
         # Leave launched programs running so they can be re-adopted next time.

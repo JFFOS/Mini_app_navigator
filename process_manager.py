@@ -15,9 +15,13 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 from typing import Dict, Optional
 
 from config import Program, KIND_PYTHON, RUNNING_PATH
+
+# How long a restart waits for the old process to exit before relaunching.
+RESTART_WAIT_SECONDS = 5.0
 
 
 class ProcessManager:
@@ -144,6 +148,23 @@ class ProcessManager:
         self._state.pop(program_id, None)
         self._save()
         return None
+
+    def restart(self, program: Program) -> Optional[str]:
+        """Stop the program (if running) and launch it again.
+
+        Waits briefly for the old process to actually exit, so a program that
+        holds an exclusive resource (a port, a lock file) can rebind it.
+        Returns None on success, or an error string from the relaunch.
+        """
+        entry = self._state.get(program.id)
+        pid = entry.get("pid", -1) if entry else -1
+        self.stop(program.id)
+        if pid > 0:
+            deadline = time.monotonic() + RESTART_WAIT_SECONDS
+            while self._alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.reap()
+        return self.launch(program)
 
     def stop_all(self):
         for pid in list(self._state.keys()):

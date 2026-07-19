@@ -36,7 +36,7 @@ pip install -r requirements.txt
 python mini_app_navigator.py
 ```
 
-Or use the included **Start Mini App Navigator.command** / **Stop Mini App
+Or use the included **Start**, **Stop**, and **Restart Mini App
 Navigator.command** launchers.
 
 Configuration and logs live under `~/.mini_app_navigator/`.

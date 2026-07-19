@@ -80,6 +80,7 @@ def _page(config: Config, procs: ProcessManager) -> str:
         badge = ('<span class="badge run">running</span>' if running
                  else '<span class="badge stop">stopped</span>')
         action = (f'<button name="action" value="stop" class="btn stop">Stop</button>'
+                  f'<button name="action" value="restart" class="btn warn">Restart</button>'
                   if running else
                   f'<button name="action" value="launch" class="btn go">Launch</button>')
         rows.append(f"""
@@ -137,11 +138,13 @@ def _page(config: Config, procs: ProcessManager) -> str:
   code {{ font-family: ui-monospace, monospace; font-size: 12px;
          background: color-mix(in srgb, CanvasText 8%, transparent); padding: 1px 5px; border-radius: 5px; }}
   .actions {{ display:flex; gap:8px; margin-top: 12px; align-items:center; }}
-  .actions form {{ margin:0; }}
+  .actions form {{ margin:0; display:flex; gap:8px; }}
   .btn {{ font: inherit; font-size: 13px; font-weight: 550; padding: 6px 12px; border-radius: 8px;
          border: 1px solid transparent; cursor: pointer; text-decoration:none; display:inline-block; }}
   .btn.go {{ background:#2563eb; color:#fff; }}
   .btn.stop {{ background:#b4530f; color:#fff; }}
+  .btn.warn {{ background: transparent; color:#b4530f;
+              border-color: color-mix(in srgb, #b4530f 45%, transparent); }}
   .btn.danger {{ background: transparent; color:#c0392b; border-color: color-mix(in srgb, #c0392b 40%, transparent); }}
   .btn.ghost {{ background: transparent; color: CanvasText; border-color: color-mix(in srgb, CanvasText 22%, transparent); }}
   .empty {{ color: color-mix(in srgb, CanvasText 55%, transparent); }}
@@ -312,6 +315,8 @@ class DashboardServer:
                             server.procs.launch(prog)
                         elif action == "stop":
                             server.procs.stop(prog.id)
+                        elif action == "restart":
+                            server.procs.restart(prog)
                         elif action == "remove":
                             server.procs.stop(prog.id)
                             server.config.remove(prog.id)
