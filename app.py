@@ -44,7 +44,7 @@ class MiniAppNavigator(rumps.App):
         """Cheap fingerprint of what the menu displays, so periodic refreshes
         can skip rebuilding (and re-allocating MenuItems) when nothing changed."""
         return tuple(
-            (p.id, p.name, p.target, self.procs.is_running(p.id))
+            (p.id, p.name, p.target, p.url, self.procs.is_running(p.id))
             for p in self.config.programs
         )
 
@@ -81,6 +81,9 @@ class MiniAppNavigator(rumps.App):
             parent.add(rumps.MenuItem("Restart", callback=self._make_restart(program)))
         else:
             parent.add(rumps.MenuItem("Launch", callback=self._make_launch(program)))
+        if program.dashboard_url():
+            # Programs that serve their own web UI get a direct open shortcut.
+            parent.add(rumps.MenuItem("Open Dashboard", callback=self._make_open_url(program)))
         parent.add(rumps.MenuItem("View Log", callback=self._make_view_log(program)))
         parent.add(rumps.separator)
         kind_label = "Python" if program.kind == KIND_PYTHON else "Shell"
@@ -113,6 +116,13 @@ class MiniAppNavigator(rumps.App):
             if err:
                 rumps.alert(f"Could not restart “{program.name}”", err)
             self._build_menu()
+        return cb
+
+    def _make_open_url(self, program: Program):
+        def cb(_):
+            # The program's own dashboard, opened straight in the default
+            # browser — no need to go through the navigator dashboard.
+            webbrowser.open(program.dashboard_url())
         return cb
 
     def _make_view_log(self, program: Program):

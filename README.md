@@ -12,6 +12,9 @@ in a local web dashboard opened from the menu.
 - 🚀 Menu bar launcher for Python scripts and shell commands
 - ▶️ Launch / stop programs and see live running status
 - 📄 Per-program log files with a live-tailing web log viewer
+- 🔗 Optional dashboard URL per program — an **Open** button (menu bar and web
+  dashboard) opens the program's own web UI in your default browser; editable
+  at any time from the program's card
 - 🌐 Local web dashboard (stdlib only) to add/remove/manage programs
 - 🔁 Launch-at-login toggle
 - 💤 On-demand loading — the dashboard web server starts only when opened,

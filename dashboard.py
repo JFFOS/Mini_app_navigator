@@ -83,6 +83,29 @@ def _page(config: Config, procs: ProcessManager) -> str:
                   f'<button name="action" value="restart" class="btn warn">Restart</button>'
                   if running else
                   f'<button name="action" value="launch" class="btn go">Launch</button>')
+        url = p.dashboard_url()
+        open_btn = (f'<a class="btn open" href="{html.escape(url)}" target="_blank" '
+                    f'rel="noopener">Open ↗</a>' if url else '')
+        if url:
+            summary = f'url: <code>{html.escape(url)}</code>'
+        elif p.url.strip():
+            # Kept as typed, but not openable — say so instead of silently
+            # dropping the Open button.
+            summary = (f'url: <code>{html.escape(p.url.strip())}</code>'
+                       f'<span class="bad">invalid URL</span>')
+        else:
+            summary = 'Set dashboard URL…'
+        url_editor = f"""
+          <details class="urledit">
+            <summary>{summary}</summary>
+            <form method="post" action="/action">
+              <input type="hidden" name="id" value="{p.id}">
+              <input name="url" value="{html.escape(p.url)}"
+                     placeholder="http://127.0.0.1:8501" aria-label="Dashboard URL">
+              <button name="action" value="set_url" class="btn ghost">Save</button>
+            </form>
+            <span class="hint">Leave empty to remove the Open button.</span>
+          </details>"""
         rows.append(f"""
         <div class="card" data-id="{p.id}">
           <div class="card-head">
@@ -93,11 +116,13 @@ def _page(config: Config, procs: ProcessManager) -> str:
             <code>{html.escape(p.target)}</code></div>
           {f'<div class="meta args">args: <code>{html.escape(p.args)}</code></div>' if p.args else ''}
           {f'<div class="meta cwd">cwd: <code>{html.escape(p.cwd)}</code></div>' if p.cwd else ''}
+          {url_editor}
           <div class="actions">
             <form method="post" action="/action">
               <input type="hidden" name="id" value="{p.id}">
               {action}
             </form>
+            {open_btn}
             <a class="btn ghost" href="/log?id={p.id}" target="_blank">Logs</a>
             <form method="post" action="/action"
                   onsubmit="return confirm('Remove {html.escape(p.name)}?');">
@@ -137,6 +162,17 @@ def _page(config: Config, procs: ProcessManager) -> str:
   .meta .kind {{ font-weight:600; margin-right:6px; }}
   code {{ font-family: ui-monospace, monospace; font-size: 12px;
          background: color-mix(in srgb, CanvasText 8%, transparent); padding: 1px 5px; border-radius: 5px; }}
+  .urledit {{ margin-top: 6px; font-size: 12.5px;
+             color: color-mix(in srgb, CanvasText 70%, transparent); }}
+  .urledit summary {{ cursor: pointer; list-style: none; display: inline-flex;
+                     align-items: center; gap: 6px; }}
+  .urledit summary::-webkit-details-marker {{ display: none; }}
+  .urledit summary::before {{ content: "✎"; opacity: .55; }}
+  .urledit summary:hover {{ color: CanvasText; }}
+  .urledit form {{ display: flex; gap: 8px; margin: 8px 0 4px; }}
+  .urledit input {{ flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 9px; }}
+  .bad {{ font-size: 11px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
+         background:#c0392b22; color:#c0392b; }}
   .actions {{ display:flex; gap:8px; margin-top: 12px; align-items:center; }}
   .actions form {{ margin:0; display:flex; gap:8px; }}
   .btn {{ font: inherit; font-size: 13px; font-weight: 550; padding: 6px 12px; border-radius: 8px;
@@ -146,6 +182,7 @@ def _page(config: Config, procs: ProcessManager) -> str:
   .btn.warn {{ background: transparent; color:#b4530f;
               border-color: color-mix(in srgb, #b4530f 45%, transparent); }}
   .btn.danger {{ background: transparent; color:#c0392b; border-color: color-mix(in srgb, #c0392b 40%, transparent); }}
+  .btn.open {{ background: transparent; color:#2563eb; border-color: color-mix(in srgb, #2563eb 45%, transparent); }}
   .btn.ghost {{ background: transparent; color: CanvasText; border-color: color-mix(in srgb, CanvasText 22%, transparent); }}
   .empty {{ color: color-mix(in srgb, CanvasText 55%, transparent); }}
   h2 {{ font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
@@ -191,6 +228,11 @@ def _page(config: Config, procs: ProcessManager) -> str:
         <input name="cwd" placeholder="/path/to/dir">
       </label>
     </div>
+    <label>Dashboard URL <span class="hint">(optional)</span>
+      <input name="url" placeholder="http://127.0.0.1:8501">
+      <span class="hint">If the program serves its own web UI, an Open button
+        appears here and in the menu bar submenu.</span>
+    </label>
     <button class="btn submit" type="submit">Add program</button>
   </form>
 </main>
@@ -304,6 +346,7 @@ class DashboardServer:
                             name=name, kind=kind, target=target,
                             args=form.get("args", "").strip(),
                             cwd=form.get("cwd", "").strip(),
+                            url=form.get("url", "").strip(),
                         ))
                     self._redirect_home()
                 elif self.path == "/action":
@@ -317,6 +360,11 @@ class DashboardServer:
                             server.procs.stop(prog.id)
                         elif action == "restart":
                             server.procs.restart(prog)
+                        elif action == "set_url":
+                            # Shared Program instance: the menu bar picks the
+                            # change up on its next refresh tick.
+                            prog.url = form.get("url", "").strip()
+                            server.config.save()
                         elif action == "remove":
                             server.procs.stop(prog.id)
                             server.config.remove(prog.id)

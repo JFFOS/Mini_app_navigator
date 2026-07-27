@@ -6,9 +6,11 @@ home directory so it survives restarts and lives outside the project tree.
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, asdict, field
 from typing import List, Optional
+from urllib.parse import urlparse
 
 CONFIG_DIR = os.path.expanduser("~/.mini_app_navigator")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -16,6 +18,13 @@ LOG_DIR = os.path.join(CONFIG_DIR, "logs")
 # Tracks PIDs of launched programs so they can be re-adopted after the app
 # quits and reopens (programs keep running when the menu bar app exits).
 RUNNING_PATH = os.path.join(CONFIG_DIR, "running.json")
+
+# A leading "scheme:" that is a real scheme rather than a "host:port" colon —
+# i.e. not followed by digits only ("localhost:8501" is a host, "file:/x" isn't).
+SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:(?!\d)")
+# Characters that never belong in a URL typed into the dashboard field; their
+# presence means it's prose or a typo, not an address.
+UNSAFE_URL_CHARS = set("\"'<>\\^`{}|")
 
 # Program kinds
 KIND_PYTHON = "python"   # run a .py file with the current interpreter
@@ -30,6 +39,7 @@ class Program:
     target: str                     # path to .py file, or shell command
     args: str = ""                  # extra arguments (space separated)
     cwd: str = ""                   # working directory (optional)
+    url: str = ""                   # program's own web UI, if it serves one
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def to_dict(self) -> dict:
@@ -44,10 +54,27 @@ class Program:
             target=d.get("target", ""),
             args=d.get("args", ""),
             cwd=d.get("cwd", ""),
+            url=d.get("url", ""),
         )
 
     def log_path(self) -> str:
         return os.path.join(LOG_DIR, f"{self.id}.log")
+
+    def dashboard_url(self) -> str:
+        """The program's web UI as a browser-openable http(s) URL.
+
+        Returns "" when no URL is configured, or when what was typed isn't
+        something we're willing to hand to the browser: only http/https, and
+        only with a plausible host (so a typo doesn't become a dead link).
+        """
+        u = self.url.strip()
+        if not u or any(ch in UNSAFE_URL_CHARS or ch.isspace() for ch in u):
+            return ""
+        if not SCHEME_RE.match(u):
+            u = "http://" + u  # bare "127.0.0.1:8501" / "localhost/app"
+        if not u.lower().startswith(("http://", "https://")):
+            return ""
+        return u if urlparse(u).hostname else ""
 
 
 class Config:
