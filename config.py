@@ -40,6 +40,7 @@ class Program:
     args: str = ""                  # extra arguments (space separated)
     cwd: str = ""                   # working directory (optional)
     url: str = ""                   # program's own web UI, if it serves one
+    auto_launch: bool = False       # start automatically when the app starts
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def to_dict(self) -> dict:
@@ -55,6 +56,7 @@ class Program:
             args=d.get("args", ""),
             cwd=d.get("cwd", ""),
             url=d.get("url", ""),
+            auto_launch=bool(d.get("auto_launch", False)),
         )
 
     def log_path(self) -> str:

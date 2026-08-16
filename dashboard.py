@@ -87,42 +87,84 @@ def _page(config: Config, procs: ProcessManager) -> str:
         open_btn = (f'<a class="btn open" href="{html.escape(url)}" target="_blank" '
                     f'rel="noopener">Open ↗</a>' if url else '')
         if url:
-            summary = f'url: <code>{html.escape(url)}</code>'
+            url_line = f'<div class="meta">url: <code>{html.escape(url)}</code></div>'
         elif p.url.strip():
             # Kept as typed, but not openable — say so instead of silently
             # dropping the Open button.
-            summary = (f'url: <code>{html.escape(p.url.strip())}</code>'
-                       f'<span class="bad">invalid URL</span>')
+            url_line = (f'<div class="meta">url: <code>{html.escape(p.url.strip())}</code>'
+                        f'<span class="bad">invalid URL</span></div>')
         else:
-            summary = 'Set dashboard URL…'
-        url_editor = f"""
-          <details class="urledit">
-            <summary>{summary}</summary>
+            url_line = ''
+        py_sel = ' selected' if p.kind == KIND_PYTHON else ''
+        sh_sel = '' if p.kind == KIND_PYTHON else ' selected'
+        auto_checked = ' checked' if p.auto_launch else ''
+        editor = f"""
+          <div class="editor" hidden>
             <form method="post" action="/action">
               <input type="hidden" name="id" value="{p.id}">
-              <input name="url" value="{html.escape(p.url)}"
-                     placeholder="http://127.0.0.1:8501" aria-label="Dashboard URL">
-              <button name="action" value="set_url" class="btn ghost">Save</button>
+              <label>Name
+                <input name="name" value="{html.escape(p.name)}" required>
+              </label>
+              <div class="row">
+                <label>Kind
+                  <select name="kind">
+                    <option value="{KIND_SHELL}"{sh_sel}>Shell command / app</option>
+                    <option value="{KIND_PYTHON}"{py_sel}>Python script</option>
+                  </select>
+                </label>
+                <label>Target
+                  <input name="target" value="{html.escape(p.target)}" required
+                         placeholder="open -a Calculator   OR   /path/to/script.py">
+                  <span class="hint">Shell command to run, or absolute path to a .py file.</span>
+                </label>
+              </div>
+              <div class="row">
+                <label>Arguments <span class="hint">(optional)</span>
+                  <input name="args" value="{html.escape(p.args)}" placeholder="--flag value">
+                </label>
+                <label>Working dir <span class="hint">(optional)</span>
+                  <input name="cwd" value="{html.escape(p.cwd)}" placeholder="/path/to/dir">
+                </label>
+              </div>
+              <label>Dashboard URL <span class="hint">(optional)</span>
+                <input name="url" value="{html.escape(p.url)}" placeholder="http://127.0.0.1:8501">
+                <span class="hint">Leave empty to remove the Open button.</span>
+              </label>
+              <div class="editor-actions">
+                <button name="action" value="edit" class="btn submit">Save changes</button>
+                <button type="button" class="btn ghost"
+                        onclick="toggleEdit(this)">Cancel</button>
+                <span class="hint">Changes apply to the next launch; restart a
+                  running program to pick them up.</span>
+              </div>
             </form>
-            <span class="hint">Leave empty to remove the Open button.</span>
-          </details>"""
+          </div>"""
         rows.append(f"""
         <div class="card" data-id="{p.id}">
           <div class="card-head">
             <span class="name">{html.escape(p.name)}</span>
             {badge}
+            <form method="post" action="/action" class="autoform">
+              <input type="hidden" name="id" value="{p.id}">
+              <input type="hidden" name="action" value="set_auto">
+              <label class="toggle" title="Launch this program when the navigator starts">
+                <input type="checkbox" name="auto" onchange="this.form.submit()"{auto_checked}>
+                <span>Auto launch</span>
+              </label>
+            </form>
           </div>
           <div class="meta"><span class="kind">{kind_label}</span>
             <code>{html.escape(p.target)}</code></div>
           {f'<div class="meta args">args: <code>{html.escape(p.args)}</code></div>' if p.args else ''}
           {f'<div class="meta cwd">cwd: <code>{html.escape(p.cwd)}</code></div>' if p.cwd else ''}
-          {url_editor}
+          {url_line}
           <div class="actions">
             <form method="post" action="/action">
               <input type="hidden" name="id" value="{p.id}">
               {action}
             </form>
             {open_btn}
+            <button type="button" class="btn ghost" onclick="toggleEdit(this)">Edit</button>
             <a class="btn ghost" href="/log?id={p.id}" target="_blank">Logs</a>
             <form method="post" action="/action"
                   onsubmit="return confirm('Remove {html.escape(p.name)}?');">
@@ -130,6 +172,7 @@ def _page(config: Config, procs: ProcessManager) -> str:
               <button name="action" value="remove" class="btn danger">Remove</button>
             </form>
           </div>
+          {editor}
         </div>""")
 
     empty = '' if config.programs else '<p class="empty">No mini programs yet — add one below.</p>'
@@ -162,15 +205,16 @@ def _page(config: Config, procs: ProcessManager) -> str:
   .meta .kind {{ font-weight:600; margin-right:6px; }}
   code {{ font-family: ui-monospace, monospace; font-size: 12px;
          background: color-mix(in srgb, CanvasText 8%, transparent); padding: 1px 5px; border-radius: 5px; }}
-  .urledit {{ margin-top: 6px; font-size: 12.5px;
-             color: color-mix(in srgb, CanvasText 70%, transparent); }}
-  .urledit summary {{ cursor: pointer; list-style: none; display: inline-flex;
-                     align-items: center; gap: 6px; }}
-  .urledit summary::-webkit-details-marker {{ display: none; }}
-  .urledit summary::before {{ content: "✎"; opacity: .55; }}
-  .urledit summary:hover {{ color: CanvasText; }}
-  .urledit form {{ display: flex; gap: 8px; margin: 8px 0 4px; }}
-  .urledit input {{ flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 9px; }}
+  .autoform {{ margin: 0 0 0 auto; }}
+  .toggle {{ display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+            font-weight: 550; cursor: pointer;
+            color: color-mix(in srgb, CanvasText 65%, transparent); }}
+  .toggle input {{ margin: 0; accent-color: #2563eb; }}
+  .toggle:hover {{ color: CanvasText; }}
+  .editor {{ margin-top: 12px; padding-top: 12px;
+            border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }}
+  .editor form {{ display: grid; gap: 12px; }}
+  .editor-actions {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
   .bad {{ font-size: 11px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
          background:#c0392b22; color:#c0392b; }}
   .actions {{ display:flex; gap:8px; margin-top: 12px; align-items:center; }}
@@ -233,12 +277,22 @@ def _page(config: Config, procs: ProcessManager) -> str:
       <span class="hint">If the program serves its own web UI, an Open button
         appears here and in the menu bar submenu.</span>
     </label>
+    <label class="toggle"><input type="checkbox" name="auto">
+      <span>Auto launch when the navigator starts</span></label>
     <button class="btn submit" type="submit">Add program</button>
   </form>
 </main>
 <script>
+  function toggleEdit(btn) {{
+    const editor = btn.closest('.card').querySelector('.editor');
+    editor.hidden = !editor.hidden;
+    if (!editor.hidden) editor.querySelector('input')?.focus();
+  }}
+
   // Live-refresh running badges without a full reload.
   async function poll() {{
+    // Never reload out from under a half-typed edit.
+    if (document.querySelector('.editor:not([hidden])')) return;
     try {{
       const r = await fetch('/api/status');
       const s = await r.json();
@@ -347,6 +401,7 @@ class DashboardServer:
                             args=form.get("args", "").strip(),
                             cwd=form.get("cwd", "").strip(),
                             url=form.get("url", "").strip(),
+                            auto_launch=bool(form.get("auto")),
                         ))
                     self._redirect_home()
                 elif self.path == "/action":
@@ -360,10 +415,26 @@ class DashboardServer:
                             server.procs.stop(prog.id)
                         elif action == "restart":
                             server.procs.restart(prog)
-                        elif action == "set_url":
+                        elif action == "edit":
                             # Shared Program instance: the menu bar picks the
-                            # change up on its next refresh tick.
+                            # change up on its next refresh tick. Name and
+                            # target are required, so a blank field keeps the
+                            # current value rather than emptying the entry.
+                            name = form.get("name", "").strip()
+                            target = form.get("target", "").strip()
+                            if name:
+                                prog.name = name
+                            if target:
+                                prog.target = target
+                            prog.kind = (KIND_PYTHON if form.get("kind") == KIND_PYTHON
+                                         else KIND_SHELL)
+                            prog.args = form.get("args", "").strip()
+                            prog.cwd = form.get("cwd", "").strip()
                             prog.url = form.get("url", "").strip()
+                            server.config.save()
+                        elif action == "set_auto":
+                            # Unchecked boxes aren't submitted at all.
+                            prog.auto_launch = bool(form.get("auto"))
                             server.config.save()
                         elif action == "remove":
                             server.procs.stop(prog.id)

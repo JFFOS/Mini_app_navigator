@@ -13,8 +13,11 @@ in a local web dashboard opened from the menu.
 - ▶️ Launch / stop programs and see live running status
 - 📄 Per-program log files with a live-tailing web log viewer
 - 🔗 Optional dashboard URL per program — an **Open** button (menu bar and web
-  dashboard) opens the program's own web UI in your default browser; editable
-  at any time from the program's card
+  dashboard) opens the program's own web UI in your default browser
+- ✏️ **Edit** button on every entry — change name, kind, command/script,
+  arguments, working dir and dashboard URL in place
+- ⚡️ Per-program **Auto launch** toggle (off by default) — flagged programs
+  start with the navigator
 - 🌐 Local web dashboard (stdlib only) to add/remove/manage programs
 - 🔁 Launch-at-login toggle
 - 💤 On-demand loading — the dashboard web server starts only when opened,

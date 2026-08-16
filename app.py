@@ -33,10 +33,30 @@ class MiniAppNavigator(rumps.App):
         # HTTP server thread + socket cost nothing unless actually used.
         self.dashboard = DashboardServer(self.config, self.procs)
         self._last_sig = None
+        self._auto_launch()
         self._build_menu()
         # Periodically refresh running indicators + pick up dashboard changes.
         self._timer = rumps.Timer(self._refresh, REFRESH_SECONDS)
         self._timer.start()
+
+    def _auto_launch(self):
+        """Start programs flagged for auto launch, at app startup.
+
+        Programs re-adopted from a previous run (still alive) are skipped, so a
+        restart of the navigator doesn't start a second copy. Failures are
+        logged to the program's own log rather than raising an alert dialog,
+        which would block the menu bar app before it finishes starting.
+        """
+        for program in self.config.programs:
+            if not program.auto_launch or self.procs.is_running(program.id):
+                continue
+            err = self.procs.launch(program)
+            if err:
+                try:
+                    with open(program.log_path(), "a") as f:
+                        f.write(f"\n=== auto launch failed: {err} ===\n")
+                except OSError:
+                    pass
 
     # ---------- menu construction ----------
 
