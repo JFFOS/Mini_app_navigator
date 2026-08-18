@@ -48,7 +48,7 @@ class MiniAppNavigator(rumps.App):
         which would block the menu bar app before it finishes starting.
         """
         for program in self.config.programs:
-            if not program.auto_launch or self.procs.is_running(program.id):
+            if not program.auto_launch or self.procs.is_running(program):
                 continue
             err = self.procs.launch(program)
             if err:
@@ -64,7 +64,7 @@ class MiniAppNavigator(rumps.App):
         """Cheap fingerprint of what the menu displays, so periodic refreshes
         can skip rebuilding (and re-allocating MenuItems) when nothing changed."""
         return tuple(
-            (p.id, p.name, p.target, p.url, self.procs.is_running(p.id))
+            (p.id, p.name, p.target, p.url, self.procs.is_running(p))
             for p in self.config.programs
         )
 
@@ -92,7 +92,7 @@ class MiniAppNavigator(rumps.App):
         self.menu = items
 
     def _program_menu(self, program: Program) -> rumps.MenuItem:
-        running = self.procs.is_running(program.id)
+        running = self.procs.is_running(program)
         parent = rumps.MenuItem(program.name)
         parent.state = 1 if running else 0  # checkmark when running
 
@@ -124,7 +124,7 @@ class MiniAppNavigator(rumps.App):
 
     def _make_stop(self, program: Program):
         def cb(_):
-            err = self.procs.stop(program.id)
+            err = self.procs.stop(program)
             if err and err != "Not running.":
                 rumps.alert(f"Could not stop “{program.name}”", err)
             self._build_menu()

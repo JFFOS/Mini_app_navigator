@@ -18,6 +18,16 @@ from process_manager import ProcessManager
 
 LOG_TAIL_BYTES = 40_000
 
+# Shown under the probe field in both the add and the edit form.
+PROBE_HINT = (
+    "Needed when the target only <em>launches</em> the program and exits "
+    "(<code>open -a Foo.app</code>, or a script that backgrounds itself) — "
+    "without it the navigator reports stopped while the program is up. "
+    "A port number, or <code>match:</code> plus text from the real process's "
+    "command line. Leave empty and a local dashboard URL above is used as the "
+    "probe automatically."
+)
+
 
 def _read_log_tail(prog: Program) -> str:
     if not os.path.exists(prog.log_path()):
@@ -75,10 +85,16 @@ def _log_page(prog: Program) -> str:
 def _page(config: Config, procs: ProcessManager) -> str:
     rows = []
     for p in config.programs:
-        running = procs.is_running(p.id)
+        running = procs.is_running(p)
         kind_label = "Python" if p.kind == KIND_PYTHON else "Shell"
         badge = ('<span class="badge run">running</span>' if running
                  else '<span class="badge stop">stopped</span>')
+        if running and procs.is_adopted(p.id):
+            # The navigator didn't spawn this one; its probe found it. Worth
+            # saying, because Stop then signals a process we merely located.
+            badge += ('<span class="badge probe" title="Found by this '
+                      'program&#39;s liveness probe, not launched from here">'
+                      'via probe</span>')
         action = (f'<button name="action" value="stop" class="btn stop">Stop</button>'
                   f'<button name="action" value="restart" class="btn warn">Restart</button>'
                   if running else
@@ -95,6 +111,18 @@ def _page(config: Config, procs: ProcessManager) -> str:
                         f'<span class="bad">invalid URL</span></div>')
         else:
             url_line = ''
+        spec = p.probe_spec()
+        if spec and not p.probe.strip():
+            probe_line = (f'<div class="meta">probe: <code>{spec[1]}</code>'
+                          f'<span class="hint"> (port, from the dashboard URL)</span></div>')
+        elif spec:
+            probe_line = (f'<div class="meta">probe: <code>{html.escape(str(spec[1]))}</code>'
+                          f'<span class="hint"> ({spec[0]})</span></div>')
+        elif p.probe.strip():
+            probe_line = (f'<div class="meta">probe: <code>{html.escape(p.probe.strip())}</code>'
+                          f'<span class="bad">invalid probe</span></div>')
+        else:
+            probe_line = ''
         py_sel = ' selected' if p.kind == KIND_PYTHON else ''
         sh_sel = '' if p.kind == KIND_PYTHON else ' selected'
         auto_checked = ' checked' if p.auto_launch else ''
@@ -130,6 +158,11 @@ def _page(config: Config, procs: ProcessManager) -> str:
                 <input name="url" value="{html.escape(p.url)}" placeholder="http://127.0.0.1:8501">
                 <span class="hint">Leave empty to remove the Open button.</span>
               </label>
+              <label>Liveness probe <span class="hint">(optional)</span>
+                <input name="probe" value="{html.escape(p.probe)}"
+                       placeholder="8787   OR   match:Stats.app/Contents/MacOS/Stats">
+                <span class="hint">{PROBE_HINT}</span>
+              </label>
               <div class="editor-actions">
                 <button name="action" value="edit" class="btn submit">Save changes</button>
                 <button type="button" class="btn ghost"
@@ -158,6 +191,7 @@ def _page(config: Config, procs: ProcessManager) -> str:
           {f'<div class="meta args">args: <code>{html.escape(p.args)}</code></div>' if p.args else ''}
           {f'<div class="meta cwd">cwd: <code>{html.escape(p.cwd)}</code></div>' if p.cwd else ''}
           {url_line}
+          {probe_line}
           <div class="actions">
             <form method="post" action="/action">
               <input type="hidden" name="id" value="{p.id}">
@@ -201,6 +235,8 @@ def _page(config: Config, procs: ProcessManager) -> str:
   .badge {{ font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }}
   .badge.run {{ background:#1f8f4d22; color:#1f8f4d; }}
   .badge.stop {{ background: color-mix(in srgb, CanvasText 12%, transparent); color: color-mix(in srgb, CanvasText 65%, transparent); }}
+  .badge.probe {{ background: transparent; color: color-mix(in srgb, CanvasText 55%, transparent);
+                 border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); cursor: help; }}
   .meta {{ font-size: 12.5px; margin-top: 6px; color: color-mix(in srgb, CanvasText 70%, transparent); }}
   .meta .kind {{ font-weight:600; margin-right:6px; }}
   code {{ font-family: ui-monospace, monospace; font-size: 12px;
@@ -276,6 +312,10 @@ def _page(config: Config, procs: ProcessManager) -> str:
       <input name="url" placeholder="http://127.0.0.1:8501">
       <span class="hint">If the program serves its own web UI, an Open button
         appears here and in the menu bar submenu.</span>
+    </label>
+    <label>Liveness probe <span class="hint">(optional)</span>
+      <input name="probe" placeholder="8787   OR   match:Stats.app/Contents/MacOS/Stats">
+      <span class="hint">{PROBE_HINT}</span>
     </label>
     <label class="toggle"><input type="checkbox" name="auto">
       <span>Auto launch when the navigator starts</span></label>
@@ -358,7 +398,7 @@ class DashboardServer:
                     self.end_headers()
                     self.wfile.write(body)
                 elif parsed.path == "/api/status":
-                    status = {p.id: server.procs.is_running(p.id) for p in server.config.programs}
+                    status = {p.id: server.procs.is_running(p) for p in server.config.programs}
                     body = json.dumps(status).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -401,6 +441,7 @@ class DashboardServer:
                             args=form.get("args", "").strip(),
                             cwd=form.get("cwd", "").strip(),
                             url=form.get("url", "").strip(),
+                            probe=form.get("probe", "").strip(),
                             auto_launch=bool(form.get("auto")),
                         ))
                     self._redirect_home()
@@ -412,7 +453,7 @@ class DashboardServer:
                         if action == "launch":
                             server.procs.launch(prog)
                         elif action == "stop":
-                            server.procs.stop(prog.id)
+                            server.procs.stop(prog)
                         elif action == "restart":
                             server.procs.restart(prog)
                         elif action == "edit":
@@ -431,13 +472,14 @@ class DashboardServer:
                             prog.args = form.get("args", "").strip()
                             prog.cwd = form.get("cwd", "").strip()
                             prog.url = form.get("url", "").strip()
+                            prog.probe = form.get("probe", "").strip()
                             server.config.save()
                         elif action == "set_auto":
                             # Unchecked boxes aren't submitted at all.
                             prog.auto_launch = bool(form.get("auto"))
                             server.config.save()
                         elif action == "remove":
-                            server.procs.stop(prog.id)
+                            server.procs.stop(prog)
                             server.config.remove(prog.id)
                     self._redirect_home()
                 else:

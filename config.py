@@ -26,6 +26,18 @@ SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:(?!\d)")
 # presence means it's prose or a typo, not an address.
 UNSAFE_URL_CHARS = set("\"'<>\\^`{}|")
 
+# A liveness probe written as a bare port ("8787"), or with an explicit
+# "port:" / "match:" prefix. Needed for programs whose command is only a
+# launcher: it hands off to a detached process and exits, so the PID we
+# spawned dies immediately even though the program is up.
+PROBE_PORT_RE = re.compile(r"^(?:port:)?(\d{1,5})$")
+PROBE_MATCH_RE = re.compile(r"^match:(.+)$", re.S)
+# Hosts whose ports can be probed locally: a URL on any of these is served by
+# a process on this machine.
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+PROBE_PORT = "port"
+PROBE_MATCH = "match"
+
 # Program kinds
 KIND_PYTHON = "python"   # run a .py file with the current interpreter
 KIND_SHELL = "shell"     # run an arbitrary shell command / open an app
@@ -40,6 +52,7 @@ class Program:
     args: str = ""                  # extra arguments (space separated)
     cwd: str = ""                   # working directory (optional)
     url: str = ""                   # program's own web UI, if it serves one
+    probe: str = ""                 # liveness probe: port, or match:<pattern>
     auto_launch: bool = False       # start automatically when the app starts
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
@@ -56,6 +69,7 @@ class Program:
             args=d.get("args", ""),
             cwd=d.get("cwd", ""),
             url=d.get("url", ""),
+            probe=d.get("probe", ""),
             auto_launch=bool(d.get("auto_launch", False)),
         )
 
@@ -77,6 +91,49 @@ class Program:
         if not u.lower().startswith(("http://", "https://")):
             return ""
         return u if urlparse(u).hostname else ""
+
+    def _url_port(self) -> Optional[int]:
+        """The port of this program's dashboard URL, when it is a local one.
+
+        A program serving its own UI on loopback already tells us how to find
+        it, so that doubles as a probe with nothing to configure. Restricted to
+        loopback: a remote host's port says nothing about a local process.
+        """
+        u = self.dashboard_url()
+        if not u:
+            return None
+        parsed = urlparse(u)
+        if (parsed.hostname or "").lower() not in LOOPBACK_HOSTS:
+            return None
+        try:
+            return parsed.port
+        except ValueError:  # malformed port in the URL
+            return None
+
+    def probe_spec(self) -> Optional[tuple]:
+        """The liveness probe as (PROBE_PORT, port) or (PROBE_MATCH, pattern).
+
+        Falls back to the dashboard URL's port when no probe is set, so a
+        program with a local web UI is tracked correctly out of the box.
+        Returns None when there is nothing usable: no probe and no local URL,
+        an out-of-range port, or a pattern that would be read as an option by
+        pgrep. Tracking stays PID-only in that case.
+        """
+        p = self.probe.strip()
+        if not p:
+            port = self._url_port()
+            return (PROBE_PORT, port) if port else None
+        m = PROBE_PORT_RE.match(p)
+        if m:
+            port = int(m.group(1))
+            return (PROBE_PORT, port) if 1 <= port <= 65535 else None
+        m = PROBE_MATCH_RE.match(p)
+        if not m:
+            return None
+        pattern = m.group(1).strip()
+        if not pattern or pattern.startswith("-"):
+            return None
+        return PROBE_MATCH, pattern
 
 
 class Config:
