@@ -5,7 +5,8 @@ small Python scripts or shell commands — from one place.
 
 Each registered program gets a submenu with **Launch / Stop / View Log** actions
 and a checkmark while it's running. Adding, removing, and full management happen
-in a local web dashboard opened from the menu.
+in a local web dashboard opened from the menu, split into three tabs —
+**Programs**, **Groups** and **Schedules**.
 
 ## Features
 
@@ -25,18 +26,39 @@ in a local web dashboard opened from the menu.
 - 🗂 **Groups** — collapse a set of programs into one menu bar entry that
   launches, stops and restarts all of them together, and hide a whole group
   from the menu when you only manage it from the dashboard — see below
-- 🌐 Local web dashboard (stdlib only) to add/remove/manage programs
+- 🌐 Local web dashboard (stdlib only), tabbed into Programs / Groups / Schedules
 - 🔁 Launch-at-login toggle
 - 💤 On-demand loading — the dashboard web server starts only when opened,
   keeping idle RAM low
 - 🧷 Programs keep running when you quit the app, and are re-adopted on relaunch
 
+## The dashboard
+
+The dashboard is three tabs, one per question you might be asking:
+
+| Tab | Answers |
+|---|---|
+| **Programs** | what each program *is* — launch/stop/restart, edit, logs, and adding new ones |
+| **Groups** | what belongs with what — membership, bulk launch/stop/restart, show or hide in the menu |
+| **Schedules** | when things run — every program's timed rules, all on one screen |
+
+Nothing is duplicated between them: per-program buttons live on Programs only,
+so there is never a second place to press the same thing. A program's card shows
+which group it is in as a chip that links to it on the Groups tab, and its
+schedule as a one-line digest with a **⏰ Schedule** link across to its rules.
+
 ## Groups
 
 A group is a named set of programs that belong together — a "morning stack", a
 set of services that only make sense running side by side. Create one under
-**Add group** in the dashboard, then pick it under **Group** in any program's
-**Edit** panel.
+**Add group** on the **Groups** tab, then press **Edit group** and tick the
+programs that belong in it.
+
+Membership is picked from the group, not one program at a time: choosing a
+group's contents is one decision about one group, and the picker is the screen
+where the whole set can be seen at once. A program belongs to exactly one group,
+so ticking one that currently sits in another *moves* it — the picker says which
+group that is before you do.
 
 In the **menu bar** a grouped program is no longer listed on its own: the group
 takes its place as a single entry, with
@@ -46,11 +68,11 @@ takes its place as a single entry, with
 - an `N of M running` line, and
 - each member still there as a submenu below, so nothing is lost by grouping.
 
-In the **dashboard** each group is a section holding its programs' cards, with
-the same three bulk buttons and a live `N of M running` count. **Edit group**
-renames it or deletes it — deleting keeps the programs, they simply go back to
-being listed on their own. Programs in no group are gathered under
-**Ungrouped**.
+On the **Groups** tab each group is a section listing its members as compact
+rows, with the same three bulk buttons and a live `N of M running` count.
+**Edit group** renames it, sets its membership, or deletes it — deleting keeps
+the programs, they simply go back to being listed on their own. Programs in no
+group are gathered under **Ungrouped**.
 
 ### Show or hide in the menu
 
@@ -62,9 +84,11 @@ deleting anything.
 
 ## Schedules
 
-Each program can carry any number of timed rules. Press **⏰ Schedule** on a
-program's card in the dashboard to add, edit, enable/disable or delete them.
-A rule is an **action**, a **time**, and the **days** it runs on:
+Each program can carry any number of timed rules, and the **Schedules** tab
+shows all of them on one screen — every program, every rule, open at once, which
+is how a set of timings is actually read. (A program's card links across with
+**⏰ Schedule**.) A rule is an **action**, a **time**, and the **days** it runs
+on:
 
 | Action | Fires |
 |---|---|
@@ -84,9 +108,9 @@ Days are picked as seven checkboxes with one-click presets:
 | Weekend | Sat, Sun |
 | *(pick your own)* | e.g. Mon, Wed, Fri — or a single day for a weekly rule |
 
-So a typical working day is one rule: *Run 09:00 → 18:30 · weekdays*. The card
-shows every rule plus the next end due, and the program's menu bar submenu shows
-an **⏰ Next:** line.
+So a typical working day is one rule: *Run 09:00 → 18:30 · weekdays*. The
+program's card digests its rules to one line, and its menu bar submenu shows an
+**⏰ Next:** line.
 
 Times are local, and rules survive sleep sensibly: a slot missed because the Mac
 was asleep or the navigator was restarting still fires up to **15 minutes** late,
