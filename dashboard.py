@@ -13,7 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from config import (Config, Program, Schedule, KIND_PYTHON, KIND_SHELL,
+from config import (Config, Group, Program, Schedule, KIND_PYTHON, KIND_SHELL,
                     ACTION_LAUNCH, ACTION_STOP, ACTION_WINDOW,
                     SCHEDULE_ACTIONS, DAY_NAMES)
 from process_manager import ProcessManager
@@ -213,7 +213,91 @@ def _schedule_block(prog: Program, sched: Scheduler) -> tuple:
     return summary, panel
 
 
-def _card(p: Program, procs: ProcessManager, sched: Scheduler) -> str:
+def _valid_group(config: Config, group_id) -> str:
+    """The submitted group id, or "" — never a group that isn't there."""
+    group_id = (group_id or "").strip()
+    return group_id if config.get_group(group_id) else ""
+
+
+def _group_select(config: Config, selected: str) -> str:
+    """The group picker shown on the add form and in every program's editor."""
+    options = [f'<option value=""{" selected" if not selected else ""}>'
+               f'— none —</option>']
+    for group in config.groups:
+        sel = ' selected' if group.id == selected else ''
+        options.append(f'<option value="{group.id}"{sel}>'
+                       f'{html.escape(group.name)}</option>')
+    return f'<select name="group">{"".join(options)}</select>'
+
+
+def _group_section(group: Group, config: Config, procs: ProcessManager,
+                   sched: Scheduler) -> str:
+    """One group: its bulk controls, its settings panel, and its members."""
+    members = config.group_programs(group.id)
+    running = procs.running_count(members)
+    if not members:
+        stat = '<span class="badge stop">empty</span>'
+    elif running == len(members):
+        stat = f'<span class="badge run gcount">all {running} running</span>'
+    elif running:
+        stat = (f'<span class="badge part gcount">{running} of {len(members)} '
+                f'running</span>')
+    else:
+        stat = f'<span class="badge stop gcount">0 of {len(members)} running</span>'
+    bulk = f"""
+        <form method="post" action="/group" class="gbulk">
+          <input type="hidden" name="gid" value="{group.id}">
+          <button name="action" value="launch" class="btn go">Launch all</button>
+          <button name="action" value="stop" class="btn stop">Stop all</button>
+          <button name="action" value="restart" class="btn warn">Restart all</button>
+        </form>""" if members else ''
+    shown = ' checked' if group.show_in_menu else ''
+    body = "\n".join(_card(config, m, procs, sched) for m in members) or (
+        '<p class="empty">No programs in this group yet — pick it under '
+        '<em>Group</em> in any program\u2019s Edit panel.</p>')
+    return f"""
+    <section class="group" data-group-id="{group.id}">
+      <div class="group-head">
+        <span class="gname">{html.escape(group.name)}</span>
+        {stat}
+        <form method="post" action="/group" class="gshow">
+          <input type="hidden" name="gid" value="{group.id}">
+          <input type="hidden" name="action" value="set_show">
+          <label class="toggle"
+                 title="Uncheck to keep this group, and its programs, out of the menu bar">
+            <input type="checkbox" name="show"
+                   onchange="this.form.requestSubmit()"{shown}>
+            <span>Show in menu</span>
+          </label>
+        </form>
+        <button type="button" class="btn ghost"
+                onclick="toggleGroupEdit(this)">Edit group</button>
+      </div>
+      {bulk}
+      <div class="group-editor" hidden>
+        <form method="post" action="/group">
+          <input type="hidden" name="gid" value="{group.id}">
+          <label>Group name
+            <input name="name" value="{html.escape(group.name)}" required>
+          </label>
+          <div class="editor-actions">
+            <button name="action" value="edit" class="btn submit">Save group</button>
+            <button type="button" class="btn ghost"
+                    onclick="toggleGroupEdit(this)">Cancel</button>
+            <button name="action" value="remove" class="btn danger"
+                    onclick="return confirm('Delete the group \u201c{html.escape(group.name)}\u201d? Its programs are kept and become ungrouped.');">
+              Delete group</button>
+            <span class="hint">Deleting a group keeps its programs — they just
+              go back to being listed on their own.</span>
+          </div>
+        </form>
+      </div>
+      <div class="grid">{body}</div>
+    </section>"""
+
+
+def _card(config: Config, p: Program, procs: ProcessManager,
+          sched: Scheduler) -> str:
     """One program's card. Rendered on its own too, to refresh it in place
     after a schedule edit without reloading the whole page."""
     running = procs.is_running(p)
@@ -286,6 +370,11 @@ def _card(p: Program, procs: ProcessManager, sched: Scheduler) -> str:
               <input name="cwd" value="{html.escape(p.cwd)}" placeholder="/path/to/dir">
             </label>
           </div>
+          <label>Group <span class="hint">(optional)</span>
+            {_group_select(config, p.group)}
+            <span class="hint">A grouped program is shown in the menu bar under
+              its group only, and starts and stops with the rest of it.</span>
+          </label>
           <label>Dashboard URL <span class="hint">(optional)</span>
             <input name="url" value="{html.escape(p.url)}" placeholder="http://127.0.0.1:8501">
             <span class="hint">Leave empty to remove the Open button.</span>
@@ -305,7 +394,7 @@ def _card(p: Program, procs: ProcessManager, sched: Scheduler) -> str:
         </form>
       </div>"""
     return f"""
-    <div class="card" data-id="{p.id}">
+    <div class="card" data-id="{p.id}" data-group="{p.group}">
       <div class="card-head">
         <span class="name">{html.escape(p.name)}</span>
         {badge}
@@ -347,10 +436,18 @@ def _card(p: Program, procs: ProcessManager, sched: Scheduler) -> str:
 
 
 def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
-    rows = [_card(p, procs, sched) for p in config.programs]
+    sections = [_group_section(g, config, procs, sched) for g in config.groups]
+    loose = config.ungrouped_programs()
+    if loose:
+        # The heading is only worth showing once there is something to
+        # contrast with; without groups these are simply "the programs".
+        heading = '<h2>Ungrouped</h2>' if config.groups else ''
+        sections.append(heading + '<div class="grid">'
+                        + "\n".join(_card(config, p, procs, sched) for p in loose)
+                        + '</div>')
 
     empty = '' if config.programs else '<p class="empty">No mini programs yet — add one below.</p>'
-    cards = "\n".join(rows)
+    cards = "\n".join(sections)
 
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -380,6 +477,7 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
   .badge {{ font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }}
   .badge.run {{ background:#1f8f4d22; color:#1f8f4d; }}
   .badge.stop {{ background: color-mix(in srgb, CanvasText 12%, transparent); color: color-mix(in srgb, CanvasText 65%, transparent); }}
+  .badge.part {{ background:#b4530f22; color:#b4530f; }}
   .badge.probe {{ background: transparent; color: color-mix(in srgb, CanvasText 55%, transparent);
                  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); cursor: help; }}
   .meta {{ font-size: 12.5px; margin-top: 6px; color: color-mix(in srgb, CanvasText 70%, transparent); }}
@@ -436,6 +534,19 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
   .btn.open {{ background: transparent; color:#2563eb; border-color: color-mix(in srgb, #2563eb 45%, transparent); }}
   .btn.ghost {{ background: transparent; color: CanvasText; border-color: color-mix(in srgb, CanvasText 22%, transparent); }}
   .empty {{ color: color-mix(in srgb, CanvasText 55%, transparent); }}
+  .group {{ border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+           border-radius: 14px; padding: 14px; margin-bottom: 16px;
+           background: color-mix(in srgb, CanvasText 2%, Canvas); }}
+  .group-head {{ display:flex; align-items:center; gap:10px; flex-wrap: wrap; }}
+  .gname {{ font-weight: 680; font-size: 15px; letter-spacing: .01em; }}
+  .group .gshow {{ margin-left: auto; }}
+  .gbulk {{ display:flex; gap:8px; margin-top: 12px; }}
+  .group-editor {{ margin-top: 12px; padding-top: 12px;
+                  border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }}
+  .group-editor form {{ display:grid; gap:12px; }}
+  .group > .grid {{ margin-top: 14px; }}
+  .group > .grid:empty {{ margin-top: 0; }}
+  form.compact {{ max-width: 420px; }}
   h2 {{ font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
        color: color-mix(in srgb, CanvasText 55%, transparent); margin: 32px 0 12px; }}
   form.add {{ border: 1px solid color-mix(in srgb, CanvasText 14%, transparent); border-radius: 12px;
@@ -451,7 +562,21 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
 <header><span class="icon">🚀</span><h1>Mini App Navigator</h1></header>
 <main>
   {empty}
-  <div class="grid">{cards}</div>
+  {cards}
+
+  <h2>Add group</h2>
+  <form class="add compact" method="post" action="/group">
+    <input type="hidden" name="action" value="add">
+    <label>Group name
+      <input name="name" required placeholder="e.g. Morning Stack">
+    </label>
+    <label class="toggle"><input type="checkbox" name="show" checked>
+      <span>Show in the menu bar</span></label>
+    <span class="hint">A group appears in the menu as a single entry that can
+      launch, stop and restart everything in it at once. Turn the checkbox off
+      to keep the group and its programs out of the menu entirely.</span>
+    <button class="btn submit" type="submit">Add group</button>
+  </form>
 
   <h2>Add mini program</h2>
   <form class="add" method="post" action="/add">
@@ -479,6 +604,9 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
         <input name="cwd" placeholder="/path/to/dir">
       </label>
     </div>
+    <label>Group <span class="hint">(optional)</span>
+      {_group_select(config, "")}
+    </label>
     <label>Dashboard URL <span class="hint">(optional)</span>
       <input name="url" placeholder="http://127.0.0.1:8501">
       <span class="hint">If the program serves its own web UI, an Open button
@@ -498,6 +626,12 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
     const editor = btn.closest('.card').querySelector('.editor');
     editor.hidden = !editor.hidden;
     if (!editor.hidden) editor.querySelector('input')?.focus();
+  }}
+
+  function toggleGroupEdit(btn) {{
+    const panel = btn.closest('.group').querySelector('.group-editor');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) panel.querySelector('input[name="name"]')?.focus();
   }}
 
   function toggleSched(btn) {{
@@ -589,8 +723,25 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
         if (!badge || isEditing(c)) continue;
         if (s[c.dataset.id] !== badge.classList.contains('run')) await refreshCard(c);
       }}
+      recountGroups(s);
     }} catch (e) {{}}
   }}
+  // Group headers count their own cards from the same status payload, so a
+  // member starting or stopping updates the group line without another fetch.
+  function recountGroups(status) {{
+    for (const section of document.querySelectorAll('.group')) {{
+      const label = section.querySelector('.gcount');
+      if (!label) continue;   // empty group: nothing to count
+      const ids = [...section.querySelectorAll('.card')].map(c => c.dataset.id);
+      const up = ids.filter(id => status[id]).length;
+      label.textContent = up === ids.length
+        ? `all ${{up}} running` : `${{up}} of ${{ids.length}} running`;
+      label.classList.toggle('run', up === ids.length);
+      label.classList.toggle('part', up > 0 && up < ids.length);
+      label.classList.toggle('stop', up === 0);
+    }}
+  }}
+
   setInterval(poll, 3000);
 </script>
 </body></html>"""
@@ -640,7 +791,7 @@ class DashboardServer:
                     return
                 prog = server.config.get(program_id)
                 # An empty body means the program is gone; the page drops the card.
-                body = (_card(prog, server.procs, server.sched)
+                body = (_card(server.config, prog, server.procs, server.sched)
                         if prog else "").encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -683,7 +834,8 @@ class DashboardServer:
                         self.send_response(404)
                         self.end_headers()
                         return
-                    body = _card(prog, server.procs, server.sched).encode("utf-8")
+                    body = _card(server.config, prog, server.procs,
+                                 server.sched).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Cache-Control", "no-store")
@@ -729,6 +881,7 @@ class DashboardServer:
                             url=form.get("url", "").strip(),
                             probe=form.get("probe", "").strip(),
                             auto_launch=bool(form.get("auto")),
+                            group=_valid_group(server.config, form.get("group")),
                         ))
                     self._redirect_home()
                 elif self.path == "/action":
@@ -760,6 +913,8 @@ class DashboardServer:
                             prog.cwd = form.get("cwd", "").strip()
                             prog.url = form.get("url", "").strip()
                             prog.probe = form.get("probe", "").strip()
+                            prog.group = _valid_group(server.config,
+                                                      form.get("group"))
                             server.config.save()
                         elif action == "set_auto":
                             # Unchecked boxes aren't submitted at all.
@@ -782,6 +937,35 @@ class DashboardServer:
                             server.procs.stop(prog)
                             server.config.remove(prog.id)
                     self._done(form.get("id", ""))
+                elif self.path == "/group":
+                    # Group edits change the shape of the page (sections gain
+                    # and lose cards), so these always answer with a reload
+                    # rather than the in-place card refresh /action uses.
+                    form = self._read_form()
+                    action = form.get("action")
+                    name = form.get("name", "").strip()
+                    if action == "add":
+                        if name:
+                            server.config.add_group(
+                                Group(name=name, show_in_menu=bool(form.get("show"))))
+                        self._redirect_home()
+                        return
+                    group = server.config.get_group(form.get("gid", ""))
+                    if group:
+                        members = server.config.group_programs(group.id)
+                        if action in ("launch", "stop", "restart"):
+                            server.procs.act_many(action, members)
+                        elif action == "edit":
+                            if name:
+                                group.name = name
+                            server.config.save()
+                        elif action == "set_show":
+                            # Unchecked boxes aren't submitted at all.
+                            group.show_in_menu = bool(form.get("show"))
+                            server.config.save()
+                        elif action == "remove":
+                            server.config.remove_group(group.id)
+                    self._redirect_home()
                 else:
                     self.send_response(404)
                     self.end_headers()

@@ -1,7 +1,8 @@
 """Persistent configuration for Mini App Navigator.
 
-Stores the list of registered mini programs in a JSON file under the user's
-home directory so it survives restarts and lives outside the project tree.
+Stores the list of registered mini programs, and the groups they are gathered
+into, in a JSON file under the user's home directory so it survives restarts and
+lives outside the project tree.
 """
 
 import json
@@ -168,6 +169,34 @@ class Schedule:
 
 
 @dataclass
+class Group:
+    """A named set of mini programs, acted on together.
+
+    Membership lives on the Program (a `group` id) rather than as a list of ids
+    here, so a program can only ever be in one group and removing a program
+    can't leave a dangling reference behind.
+
+    `show_in_menu` hides the whole group — entry and members — from the menu bar
+    without ungrouping or deleting anything, for programs that are managed from
+    the dashboard and only clutter the menu.
+    """
+    name: str
+    show_in_menu: bool = True
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Group":
+        return Group(
+            id=d.get("id") or uuid.uuid4().hex[:8],
+            name=d.get("name", "Untitled group"),
+            show_in_menu=bool(d.get("show_in_menu", True)),
+        )
+
+
+@dataclass
 class Program:
     """A single registered mini program."""
     name: str
@@ -178,6 +207,7 @@ class Program:
     url: str = ""                   # program's own web UI, if it serves one
     probe: str = ""                 # liveness probe: port, or match:<pattern>
     auto_launch: bool = False       # start automatically when the app starts
+    group: str = ""                 # id of the Group it belongs to, if any
     schedules: List[Schedule] = field(default_factory=list)   # timed rules
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
@@ -196,6 +226,7 @@ class Program:
             url=d.get("url", ""),
             probe=d.get("probe", ""),
             auto_launch=bool(d.get("auto_launch", False)),
+            group=d.get("group", "") or "",
             schedules=[Schedule.from_dict(x) for x in d.get("schedules", [])
                        if isinstance(x, dict)],
         )
@@ -267,10 +298,11 @@ class Program:
 
 
 class Config:
-    """Loads and saves the list of programs."""
+    """Loads and saves the list of programs and the groups they belong to."""
 
     def __init__(self):
         self.programs: List[Program] = []
+        self.groups: List[Group] = []
         self._ensure_dirs()
         self.load()
 
@@ -281,18 +313,31 @@ class Config:
     def load(self):
         if not os.path.exists(CONFIG_PATH):
             self.programs = []
+            self.groups = []
             return
         try:
             with open(CONFIG_PATH, "r") as f:
                 data = json.load(f)
             self.programs = [Program.from_dict(d) for d in data.get("programs", [])]
+            self.groups = [Group.from_dict(d) for d in data.get("groups", [])]
         except (json.JSONDecodeError, OSError):
             self.programs = []
+            self.groups = []
+        # A config edited by hand (or written by an older version) can name a
+        # group that isn't there; such a program is ungrouped rather than
+        # invisible in a group that never renders.
+        known = {g.id for g in self.groups}
+        for program in self.programs:
+            if program.group and program.group not in known:
+                program.group = ""
 
     def save(self):
         self._ensure_dirs()
         with open(CONFIG_PATH, "w") as f:
-            json.dump({"programs": [p.to_dict() for p in self.programs]}, f, indent=2)
+            json.dump({
+                "programs": [p.to_dict() for p in self.programs],
+                "groups": [g.to_dict() for g in self.groups],
+            }, f, indent=2)
 
     def add(self, program: Program):
         self.programs.append(program)
@@ -304,3 +349,27 @@ class Config:
 
     def get(self, program_id: str) -> Optional[Program]:
         return next((p for p in self.programs if p.id == program_id), None)
+
+    # ---------- groups ----------
+
+    def add_group(self, group: Group):
+        self.groups.append(group)
+        self.save()
+
+    def remove_group(self, group_id: str):
+        """Delete a group. Its programs are kept, and become ungrouped."""
+        self.groups = [g for g in self.groups if g.id != group_id]
+        for program in self.programs:
+            if program.group == group_id:
+                program.group = ""
+        self.save()
+
+    def get_group(self, group_id: str) -> Optional[Group]:
+        return next((g for g in self.groups if g.id == group_id), None)
+
+    def group_programs(self, group_id: str) -> List[Program]:
+        """The group's members, in the order the programs were added."""
+        return [p for p in self.programs if p.group == group_id]
+
+    def ungrouped_programs(self) -> List[Program]:
+        return [p for p in self.programs if not p.group]

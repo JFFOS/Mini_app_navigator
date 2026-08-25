@@ -296,6 +296,31 @@ class ProcessManager:
         self._probe_cache.pop(program.id, None)
         return self.launch(program)
 
+    # ---------- bulk actions ----------
+
+    def act_many(self, action: str, programs) -> list:
+        """Apply launch / stop / restart to several programs — a whole group.
+
+        Returns one "name: reason" string per program that actually failed.
+        A launch of something already up, or a stop of something already down,
+        is what "all of them" means for the rest of the group, so those are not
+        reported as failures.
+        """
+        run = {"launch": self.launch, "stop": self.stop,
+               "restart": self.restart}.get(action)
+        if run is None:
+            return []
+        benign = {"Already running.", "Not running."}
+        errors = []
+        for program in programs:
+            err = run(program)
+            if err and err not in benign:
+                errors.append(f"{program.name}: {err}")
+        return errors
+
+    def running_count(self, programs) -> int:
+        return sum(1 for p in programs if self.is_running(p))
+
     def stop_all(self):
         """Stop everything currently tracked (probe-only programs excluded —
         stopping those needs the Program, which this doesn't have)."""

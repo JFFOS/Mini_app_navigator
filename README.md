@@ -22,11 +22,43 @@ in a local web dashboard opened from the menu.
   start with the navigator
 - ⏰ Per-program **schedule** — launch and stop at set times, daily, on weekdays,
   on weekends, or on any weekdays you pick — see below
+- 🗂 **Groups** — collapse a set of programs into one menu bar entry that
+  launches, stops and restarts all of them together, and hide a whole group
+  from the menu when you only manage it from the dashboard — see below
 - 🌐 Local web dashboard (stdlib only) to add/remove/manage programs
 - 🔁 Launch-at-login toggle
 - 💤 On-demand loading — the dashboard web server starts only when opened,
   keeping idle RAM low
 - 🧷 Programs keep running when you quit the app, and are re-adopted on relaunch
+
+## Groups
+
+A group is a named set of programs that belong together — a "morning stack", a
+set of services that only make sense running side by side. Create one under
+**Add group** in the dashboard, then pick it under **Group** in any program's
+**Edit** panel.
+
+In the **menu bar** a grouped program is no longer listed on its own: the group
+takes its place as a single entry, with
+
+- **Launch All / Stop All / Restart All** for everything in it at once,
+- a checkmark when every member is running and a dash when only some are,
+- an `N of M running` line, and
+- each member still there as a submenu below, so nothing is lost by grouping.
+
+In the **dashboard** each group is a section holding its programs' cards, with
+the same three bulk buttons and a live `N of M running` count. **Edit group**
+renames it or deletes it — deleting keeps the programs, they simply go back to
+being listed on their own. Programs in no group are gathered under
+**Ungrouped**.
+
+### Show or hide in the menu
+
+Every group has a **Show in menu** checkbox in its dashboard header. Turn it off
+and the group *and its programs* disappear from the menu bar entirely, while
+staying fully manageable — and fully scheduled — from the dashboard. That keeps
+the menu to the things you actually launch by hand, without ungrouping or
+deleting anything.
 
 ## Schedules
 

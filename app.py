@@ -1,10 +1,12 @@
 """Mini App Navigator — a macOS menu bar app to launch and manage mini programs.
 
 Each registered program (a Python script or a shell command) gets a submenu
-with Launch / Stop / View Log actions, and a checkmark while running. Adding,
-removing, and full management happen in a local web dashboard (see dashboard.py)
-opened from the menu. The program list is persisted to
-~/.mini_app_navigator/config.json.
+with Launch / Stop / View Log actions, and a checkmark while running. Programs
+can be gathered into groups; a group replaces its members in the menu with one
+entry that launches, stops and restarts all of them together, and can be hidden
+from the menu altogether. Adding, removing, and full management happen in a
+local web dashboard (see dashboard.py) opened from the menu. The program list is
+persisted to ~/.mini_app_navigator/config.json.
 """
 
 import os
@@ -15,7 +17,7 @@ import webbrowser
 
 import rumps
 
-from config import Config, Program, KIND_PYTHON
+from config import Config, Group, Program, KIND_PYTHON
 from process_manager import ProcessManager
 from dashboard import DashboardServer
 from scheduler import Scheduler
@@ -68,23 +70,34 @@ class MiniAppNavigator(rumps.App):
     def _signature(self):
         """Cheap fingerprint of what the menu displays, so periodic refreshes
         can skip rebuilding (and re-allocating MenuItems) when nothing changed."""
-        return tuple(
-            (p.id, p.name, p.target, p.url, self.procs.is_running(p),
-             self.scheduler.summary(p))
-            for p in self.config.programs
+        return (
+            tuple(
+                (p.id, p.name, p.target, p.url, p.group, self.procs.is_running(p),
+                 self.scheduler.summary(p))
+                for p in self.config.programs
+            ),
+            tuple((g.id, g.name, g.show_in_menu) for g in self.config.groups),
         )
 
     def _build_menu(self):
         self._last_sig = self._signature()
         self.menu.clear()
         items = []
-        if not self.config.programs:
-            placeholder = rumps.MenuItem("No mini programs yet")
+        # A grouped program is reached through its group, never listed again at
+        # the top level — collapsing a set of programs into one entry is the
+        # point of a group. A group set to hide takes its members with it.
+        for group in self.config.groups:
+            if group.show_in_menu:
+                items.append(self._group_menu(group))
+        for program in self.config.ungrouped_programs():
+            items.append(self._program_menu(program))
+        if not items:
+            hidden = bool(self.config.programs)
+            placeholder = rumps.MenuItem(
+                "All programs are in hidden groups" if hidden
+                else "No mini programs yet")
             placeholder.set_callback(None)
             items.append(placeholder)
-        else:
-            for program in self.config.programs:
-                items.append(self._program_menu(program))
 
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open Dashboard…", callback=self.on_dashboard))
@@ -96,6 +109,41 @@ class MiniAppNavigator(rumps.App):
         items.append(rumps.MenuItem("Restart Navigator", callback=self.on_restart_self))
         items.append(rumps.MenuItem("Quit (programs keep running)", callback=self.on_quit))
         self.menu = items
+
+    def _group_menu(self, group: Group) -> rumps.MenuItem:
+        """A whole group as one menu entry: act on all of it, or drill in.
+
+        The checkmark is on when every member is running and mixed (a dash)
+        when only some are, so the entry says at a glance whether "all of it"
+        is actually the state of things.
+        """
+        members = self.config.group_programs(group.id)
+        running = self.procs.running_count(members)
+        parent = rumps.MenuItem(group.name)
+        parent.state = 0 if running == 0 else (1 if running == len(members) else -1)
+
+        if not members:
+            empty = rumps.MenuItem("(no programs in this group)")
+            empty.set_callback(None)
+            parent.add(empty)
+            return parent
+
+        parent.add(rumps.MenuItem("Launch All",
+                                  callback=self._make_group_action(group, "launch")))
+        parent.add(rumps.MenuItem("Stop All",
+                                  callback=self._make_group_action(group, "stop")))
+        parent.add(rumps.MenuItem("Restart All",
+                                  callback=self._make_group_action(group, "restart")))
+        parent.add(rumps.separator)
+        count = rumps.MenuItem(f"{running} of {len(members)} running")
+        count.set_callback(None)
+        parent.add(count)
+        parent.add(rumps.separator)
+        # The members themselves stay reachable, one level further in, so
+        # grouping never costs the per-program actions.
+        for program in members:
+            parent.add(self._program_menu(program))
+        return parent
 
     def _program_menu(self, program: Program) -> rumps.MenuItem:
         running = self.procs.is_running(program)
@@ -146,6 +194,17 @@ class MiniAppNavigator(rumps.App):
             err = self.procs.restart(program)
             if err:
                 rumps.alert(f"Could not restart “{program.name}”", err)
+            self._build_menu()
+        return cb
+
+    def _make_group_action(self, group: Group, action: str):
+        def cb(_):
+            errors = self.procs.act_many(action, self.config.group_programs(group.id))
+            if errors:
+                # One alert for the group: a failing member shouldn't put up a
+                # dialog per program in front of the ones that worked.
+                rumps.alert(f"Could not {action} all of “{group.name}”",
+                            "\n".join(errors))
             self._build_menu()
         return cb
 
