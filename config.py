@@ -18,6 +18,9 @@ LOG_DIR = os.path.join(CONFIG_DIR, "logs")
 # Tracks PIDs of launched programs so they can be re-adopted after the app
 # quits and reopens (programs keep running when the menu bar app exits).
 RUNNING_PATH = os.path.join(CONFIG_DIR, "running.json")
+# Remembers which schedule occurrence each rule last fired, so a rule doesn't
+# fire twice for the same slot after the app is restarted or the Mac wakes.
+SCHEDULE_STATE_PATH = os.path.join(CONFIG_DIR, "schedule_state.json")
 
 # A leading "scheme:" that is a real scheme rather than a "host:port" colon —
 # i.e. not followed by digits only ("localhost:8501" is a host, "file:/x" isn't).
@@ -42,6 +45,127 @@ PROBE_MATCH = "match"
 KIND_PYTHON = "python"   # run a .py file with the current interpreter
 KIND_SHELL = "shell"     # run an arbitrary shell command / open an app
 
+# Schedule actions
+ACTION_LAUNCH = "launch"
+ACTION_STOP = "stop"
+# One rule that does both: launch at `at`, stop again at `until`. Keeping the
+# pair together means the days are picked once and can't drift apart.
+ACTION_WINDOW = "window"
+SCHEDULE_ACTIONS = (ACTION_LAUNCH, ACTION_STOP, ACTION_WINDOW)
+
+# Weekdays as datetime.weekday() numbers them: Monday is 0.
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+WEEKDAYS = frozenset({0, 1, 2, 3, 4})
+WEEKEND = frozenset({5, 6})
+EVERY_DAY = frozenset(range(7))
+# "9:00" and "09:00" both mean the same thing.
+TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+@dataclass
+class Schedule:
+    """One timed rule: launch, stop, or both, at a time on given days.
+
+    Days are stored as explicit weekday numbers rather than a preset name, so
+    "daily", "weekdays", "weekends", "every Tuesday" and any hand-picked
+    combination are all the same thing stored one way — the dashboard just
+    offers the common ones as one-click presets.
+
+    An ACTION_WINDOW rule runs the program between `at` and `until`. An `until`
+    at or before `at` reads as overnight, so 22:00 → 06:00 stops the next
+    morning rather than being rejected.
+    """
+    action: str = ACTION_LAUNCH     # ACTION_LAUNCH, ACTION_STOP or ACTION_WINDOW
+    at: str = "09:00"               # HH:MM, local time — launch (or stop) time
+    until: str = "18:00"            # HH:MM — stop time, ACTION_WINDOW only
+    days: List[int] = field(default_factory=list)   # 0 = Monday … 6 = Sunday
+    enabled: bool = True
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+
+    @staticmethod
+    def from_dict(d: dict) -> "Schedule":
+        days = []
+        for value in d.get("days", []):
+            try:
+                day = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= day <= 6 and day not in days:
+                days.append(day)
+        action = d.get("action")
+        return Schedule(
+            id=d.get("id") or uuid.uuid4().hex[:8],
+            action=action if action in SCHEDULE_ACTIONS else ACTION_LAUNCH,
+            at=d.get("at", "09:00"),
+            until=d.get("until", "18:00"),
+            days=sorted(days),
+            enabled=bool(d.get("enabled", True)),
+        )
+
+    @staticmethod
+    def _parse_time(value: str) -> Optional[tuple]:
+        m = TIME_RE.match((value or "").strip())
+        if not m:
+            return None
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+        return None
+
+    def time_of_day(self) -> Optional[tuple]:
+        """(hour, minute) of `at`, or None when the time doesn't parse."""
+        return self._parse_time(self.at)
+
+    def until_time_of_day(self) -> Optional[tuple]:
+        """(hour, minute) of `until`, or None. Meaningful for windows only."""
+        return self._parse_time(self.until)
+
+    def is_window(self) -> bool:
+        return self.action == ACTION_WINDOW
+
+    def wraps_midnight(self) -> bool:
+        """True when a window's stop time lands on the following day."""
+        start, end = self.time_of_day(), self.until_time_of_day()
+        return bool(self.is_window() and start and end and end <= start)
+
+    def is_valid(self) -> bool:
+        """A rule with no days, or an unusable time, can never fire."""
+        if not self.days or self.time_of_day() is None:
+            return False
+        if self.is_window():
+            end = self.until_time_of_day()
+            # Equal times would be a zero-length window — a stop landing on the
+            # same minute as its own launch. Read as overnight instead.
+            return end is not None
+        return True
+
+    def is_active(self) -> bool:
+        return self.enabled and self.is_valid()
+
+    def action_label(self) -> str:
+        if self.action == ACTION_WINDOW:
+            return "Run"
+        return "Launch" if self.action == ACTION_LAUNCH else "Stop"
+
+    def days_label(self) -> str:
+        chosen = frozenset(self.days)
+        if not chosen:
+            return "no days"
+        if chosen == EVERY_DAY:
+            return "every day"
+        if chosen == WEEKDAYS:
+            return "weekdays"
+        if chosen == WEEKEND:
+            return "weekends"
+        return ", ".join(DAY_NAMES[d] for d in sorted(chosen))
+
+    def label(self) -> str:
+        if self.is_window():
+            overnight = " next day" if self.wraps_midnight() else ""
+            return (f"Run {self.at} → {self.until}{overnight} · "
+                    f"{self.days_label()}")
+        return f"{self.action_label()} {self.at} · {self.days_label()}"
+
 
 @dataclass
 class Program:
@@ -54,6 +178,7 @@ class Program:
     url: str = ""                   # program's own web UI, if it serves one
     probe: str = ""                 # liveness probe: port, or match:<pattern>
     auto_launch: bool = False       # start automatically when the app starts
+    schedules: List[Schedule] = field(default_factory=list)   # timed rules
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def to_dict(self) -> dict:
@@ -71,10 +196,15 @@ class Program:
             url=d.get("url", ""),
             probe=d.get("probe", ""),
             auto_launch=bool(d.get("auto_launch", False)),
+            schedules=[Schedule.from_dict(x) for x in d.get("schedules", [])
+                       if isinstance(x, dict)],
         )
 
     def log_path(self) -> str:
         return os.path.join(LOG_DIR, f"{self.id}.log")
+
+    def get_schedule(self, schedule_id: str) -> Optional["Schedule"]:
+        return next((s for s in self.schedules if s.id == schedule_id), None)
 
     def dashboard_url(self) -> str:
         """The program's web UI as a browser-openable http(s) URL.

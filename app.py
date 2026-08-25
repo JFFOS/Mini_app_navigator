@@ -18,6 +18,7 @@ import rumps
 from config import Config, Program, KIND_PYTHON
 from process_manager import ProcessManager
 from dashboard import DashboardServer
+from scheduler import Scheduler
 import login_item
 
 REFRESH_SECONDS = 3
@@ -31,9 +32,13 @@ class MiniAppNavigator(rumps.App):
         # The dashboard shares these exact instances, so menu and web UI stay
         # in sync automatically. It is started lazily (on first open) so the
         # HTTP server thread + socket cost nothing unless actually used.
-        self.dashboard = DashboardServer(self.config, self.procs)
+        self.scheduler = Scheduler(self.config, self.procs)
+        self.dashboard = DashboardServer(self.config, self.procs, self.scheduler)
         self._last_sig = None
         self._auto_launch()
+        # Started after auto launch so a "launch" rule that is already within
+        # its grace window doesn't race the startup launch of the same program.
+        self.scheduler.start()
         self._build_menu()
         # Periodically refresh running indicators + pick up dashboard changes.
         self._timer = rumps.Timer(self._refresh, REFRESH_SECONDS)
@@ -64,7 +69,8 @@ class MiniAppNavigator(rumps.App):
         """Cheap fingerprint of what the menu displays, so periodic refreshes
         can skip rebuilding (and re-allocating MenuItems) when nothing changed."""
         return tuple(
-            (p.id, p.name, p.target, p.url, self.procs.is_running(p))
+            (p.id, p.name, p.target, p.url, self.procs.is_running(p),
+             self.scheduler.summary(p))
             for p in self.config.programs
         )
 
@@ -110,6 +116,11 @@ class MiniAppNavigator(rumps.App):
         detail = rumps.MenuItem(f"[{kind_label}] {program.target}")
         detail.set_callback(None)
         parent.add(detail)
+        summary = self.scheduler.summary(program)
+        if summary:
+            upcoming = rumps.MenuItem(f"⏰ Next: {summary}")
+            upcoming.set_callback(None)
+            parent.add(upcoming)
         return parent
 
     # ---------- callbacks ----------
@@ -187,11 +198,13 @@ class MiniAppNavigator(rumps.App):
         except OSError as e:
             rumps.alert("Could not restart Mini App Navigator", str(e))
             return
+        self.scheduler.stop()
         self.dashboard.stop()
         rumps.quit_application()
 
     def on_quit(self, _):
         # Leave launched programs running so they can be re-adopted next time.
+        self.scheduler.stop()
         self.dashboard.stop()
         rumps.quit_application()
 

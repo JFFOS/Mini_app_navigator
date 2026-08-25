@@ -13,8 +13,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from config import Config, Program, KIND_PYTHON, KIND_SHELL
+from config import (Config, Program, Schedule, KIND_PYTHON, KIND_SHELL,
+                    ACTION_LAUNCH, ACTION_STOP, ACTION_WINDOW,
+                    SCHEDULE_ACTIONS, DAY_NAMES)
 from process_manager import ProcessManager
+from scheduler import Scheduler
 
 LOG_TAIL_BYTES = 40_000
 
@@ -82,132 +85,269 @@ def _log_page(prog: Program) -> str:
 </body></html>"""
 
 
-def _page(config: Config, procs: ProcessManager) -> str:
-    rows = []
-    for p in config.programs:
-        running = procs.is_running(p)
-        kind_label = "Python" if p.kind == KIND_PYTHON else "Shell"
-        badge = ('<span class="badge run">running</span>' if running
-                 else '<span class="badge stop">stopped</span>')
-        if running and procs.is_adopted(p.id):
-            # The navigator didn't spawn this one; its probe found it. Worth
-            # saying, because Stop then signals a process we merely located.
-            badge += ('<span class="badge probe" title="Found by this '
-                      'program&#39;s liveness probe, not launched from here">'
-                      'via probe</span>')
-        action = (f'<button name="action" value="stop" class="btn stop">Stop</button>'
-                  f'<button name="action" value="restart" class="btn warn">Restart</button>'
-                  if running else
-                  f'<button name="action" value="launch" class="btn go">Launch</button>')
-        url = p.dashboard_url()
-        open_btn = (f'<a class="btn open" href="{html.escape(url)}" target="_blank" '
-                    f'rel="noopener">Open ↗</a>' if url else '')
-        if url:
-            url_line = f'<div class="meta">url: <code>{html.escape(url)}</code></div>'
-        elif p.url.strip():
-            # Kept as typed, but not openable — say so instead of silently
-            # dropping the Open button.
-            url_line = (f'<div class="meta">url: <code>{html.escape(p.url.strip())}</code>'
-                        f'<span class="bad">invalid URL</span></div>')
-        else:
-            url_line = ''
-        spec = p.probe_spec()
-        if spec and not p.probe.strip():
-            probe_line = (f'<div class="meta">probe: <code>{spec[1]}</code>'
-                          f'<span class="hint"> (port, from the dashboard URL)</span></div>')
-        elif spec:
-            probe_line = (f'<div class="meta">probe: <code>{html.escape(str(spec[1]))}</code>'
-                          f'<span class="hint"> ({spec[0]})</span></div>')
-        elif p.probe.strip():
-            probe_line = (f'<div class="meta">probe: <code>{html.escape(p.probe.strip())}</code>'
-                          f'<span class="bad">invalid probe</span></div>')
-        else:
-            probe_line = ''
-        py_sel = ' selected' if p.kind == KIND_PYTHON else ''
-        sh_sel = '' if p.kind == KIND_PYTHON else ' selected'
-        auto_checked = ' checked' if p.auto_launch else ''
-        editor = f"""
-          <div class="editor" hidden>
-            <form method="post" action="/action">
-              <input type="hidden" name="id" value="{p.id}">
-              <label>Name
-                <input name="name" value="{html.escape(p.name)}" required>
-              </label>
-              <div class="row">
-                <label>Kind
-                  <select name="kind">
-                    <option value="{KIND_SHELL}"{sh_sel}>Shell command / app</option>
-                    <option value="{KIND_PYTHON}"{py_sel}>Python script</option>
-                  </select>
+def _apply_schedule_form(rule: Schedule, form: dict, raw: dict):
+    """Copy one submitted rule form onto a Schedule.
+
+    Whatever is submitted is kept as-is, even when it can't fire (no days, or a
+    time the browser let through): the rule is then shown with a "never fires"
+    marker, which beats silently discarding what was typed.
+    """
+    action = form.get("sched_action")
+    rule.action = action if action in SCHEDULE_ACTIONS else ACTION_LAUNCH
+    rule.at = form.get("at", "").strip() or rule.at
+    rule.until = form.get("until", "").strip() or rule.until
+    days = []
+    for value in raw.get("days", []):
+        try:
+            day = int(value)
+        except ValueError:
+            continue
+        if 0 <= day <= 6 and day not in days:
+            days.append(day)
+    rule.days = sorted(days)
+    rule.enabled = bool(form.get("enabled"))  # unchecked boxes aren't submitted
+
+
+def _schedule_from_form(form: dict, raw: dict) -> Schedule:
+    rule = Schedule()
+    _apply_schedule_form(rule, form, raw)
+    return rule
+
+
+def _day_boxes(selected) -> str:
+    """The seven weekday checkboxes, Monday first."""
+    chosen = set(selected)
+    return "".join(
+        f'<label class="day"><input type="checkbox" name="days" value="{i}"'
+        f'{" checked" if i in chosen else ""}><span>{DAY_NAMES[i]}</span></label>'
+        for i in range(7)
+    )
+
+
+def _rule_form(prog: Program, rule: Schedule = None) -> str:
+    """One schedule rule as an editable row, or the blank "add" row.
+
+    Add and edit are the same form so a rule reads the same whichever side of
+    saving it is on; the only difference is the hidden rule id and the button.
+    """
+    adding = rule is None
+    rule = rule or Schedule(action=ACTION_WINDOW, days=sorted(range(7)))
+    launch_sel = ' selected' if rule.action == ACTION_LAUNCH else ''
+    stop_sel = ' selected' if rule.action == ACTION_STOP else ''
+    window_sel = ' selected' if rule.action == ACTION_WINDOW else ''
+    # The "until" field only means anything for a window rule, so it is hidden
+    # for the other two rather than sitting there asking to be filled in.
+    until_hidden = '' if rule.is_window() else ' hidden'
+    overnight = (' <span class="hint">next day</span>'
+                 if rule.wraps_midnight() else '')
+    on_checked = ' checked' if rule.enabled else ''
+    sid = '' if adding else f'<input type="hidden" name="sid" value="{rule.id}">'
+    warn = ('' if adding or rule.is_valid() else
+            '<span class="bad" title="Pick at least one day, and a valid time">'
+            'never fires</span>')
+    if adding:
+        buttons = ('<button name="action" value="add_schedule" class="btn submit">'
+                   'Add rule</button>')
+    else:
+        buttons = ('<button name="action" value="save_schedule" class="btn submit">'
+                   'Save</button>'
+                   '<button name="action" value="remove_schedule" class="btn danger">'
+                   'Remove</button>')
+    return f"""
+            <form method="post" action="/action" class="rule{' adding' if adding else ''}">
+              <input type="hidden" name="id" value="{prog.id}">
+              {sid}
+              <div class="rule-top">
+                <label class="toggle" title="Turn this rule off without deleting it">
+                  <input type="checkbox" name="enabled"{on_checked}><span>on</span>
                 </label>
-                <label>Target
-                  <input name="target" value="{html.escape(p.target)}" required
-                         placeholder="open -a Calculator   OR   /path/to/script.py">
-                  <span class="hint">Shell command to run, or absolute path to a .py file.</span>
-                </label>
+                <select name="sched_action" aria-label="Action"
+                        onchange="syncUntil(this)">
+                  <option value="{ACTION_WINDOW}"{window_sel}>Launch &amp; stop</option>
+                  <option value="{ACTION_LAUNCH}"{launch_sel}>Launch only</option>
+                  <option value="{ACTION_STOP}"{stop_sel}>Stop only</option>
+                </select>
+                <input type="time" name="at" value="{html.escape(rule.at)}" required
+                       aria-label="Time">
+                <span class="until"{until_hidden}>
+                  <span class="arrow">→</span>
+                  <input type="time" name="until" value="{html.escape(rule.until)}"
+                         aria-label="Stop time">{overnight}
+                </span>
+                {warn}
               </div>
-              <div class="row">
-                <label>Arguments <span class="hint">(optional)</span>
-                  <input name="args" value="{html.escape(p.args)}" placeholder="--flag value">
-                </label>
-                <label>Working dir <span class="hint">(optional)</span>
-                  <input name="cwd" value="{html.escape(p.cwd)}" placeholder="/path/to/dir">
-                </label>
+              <div class="rule-days">
+                {_day_boxes(rule.days)}
+                <span class="presets">
+                  <button type="button" onclick="setDays(this,'all')">Daily</button>
+                  <button type="button" onclick="setDays(this,'week')">Weekdays</button>
+                  <button type="button" onclick="setDays(this,'end')">Weekend</button>
+                  <button type="button" onclick="setDays(this,'none')">Clear</button>
+                </span>
               </div>
-              <label>Dashboard URL <span class="hint">(optional)</span>
-                <input name="url" value="{html.escape(p.url)}" placeholder="http://127.0.0.1:8501">
-                <span class="hint">Leave empty to remove the Open button.</span>
-              </label>
-              <label>Liveness probe <span class="hint">(optional)</span>
-                <input name="probe" value="{html.escape(p.probe)}"
-                       placeholder="8787   OR   match:Stats.app/Contents/MacOS/Stats">
-                <span class="hint">{PROBE_HINT}</span>
-              </label>
-              <div class="editor-actions">
-                <button name="action" value="edit" class="btn submit">Save changes</button>
-                <button type="button" class="btn ghost"
-                        onclick="toggleEdit(this)">Cancel</button>
-                <span class="hint">Changes apply to the next launch; restart a
-                  running program to pick them up.</span>
-              </div>
-            </form>
+              <div class="rule-actions">{buttons}</div>
+            </form>"""
+
+
+def _schedule_block(prog: Program, sched: Scheduler) -> tuple:
+    """(summary line for the card, hidden panel with the rule editors)."""
+    rules = list(prog.schedules)
+    if rules:
+        labels = " · ".join(html.escape(r.label()) + ("" if r.enabled else " (off)")
+                            for r in rules)
+        upcoming = sched.summary(prog)
+        next_bit = (f'<span class="hint"> — next: {html.escape(upcoming)}</span>'
+                    if upcoming else '')
+        summary = f'<div class="meta">schedule: {labels}{next_bit}</div>'
+    else:
+        summary = ''
+    panel = f"""
+          <div class="sched-panel" hidden>
+            <div class="sched-title">Schedule
+              <span class="hint">Times are local. A rule fires up to 15 minutes
+                late if the Mac was asleep, and is skipped after that.</span>
+            </div>
+            {''.join(_rule_form(prog, r) for r in rules)}
+            {_rule_form(prog)}
           </div>"""
-        rows.append(f"""
-        <div class="card" data-id="{p.id}">
-          <div class="card-head">
-            <span class="name">{html.escape(p.name)}</span>
-            {badge}
-            <form method="post" action="/action" class="autoform">
-              <input type="hidden" name="id" value="{p.id}">
-              <input type="hidden" name="action" value="set_auto">
-              <label class="toggle" title="Launch this program when the navigator starts">
-                <input type="checkbox" name="auto" onchange="this.form.submit()"{auto_checked}>
-                <span>Auto launch</span>
-              </label>
-            </form>
+    return summary, panel
+
+
+def _card(p: Program, procs: ProcessManager, sched: Scheduler) -> str:
+    """One program's card. Rendered on its own too, to refresh it in place
+    after a schedule edit without reloading the whole page."""
+    running = procs.is_running(p)
+    kind_label = "Python" if p.kind == KIND_PYTHON else "Shell"
+    badge = ('<span class="badge run">running</span>' if running
+             else '<span class="badge stop">stopped</span>')
+    if running and procs.is_adopted(p.id):
+        # The navigator didn't spawn this one; its probe found it. Worth
+        # saying, because Stop then signals a process we merely located.
+        badge += ('<span class="badge probe" title="Found by this '
+                  'program&#39;s liveness probe, not launched from here">'
+                  'via probe</span>')
+    action = (f'<button name="action" value="stop" class="btn stop">Stop</button>'
+              f'<button name="action" value="restart" class="btn warn">Restart</button>'
+              if running else
+              f'<button name="action" value="launch" class="btn go">Launch</button>')
+    url = p.dashboard_url()
+    open_btn = (f'<a class="btn open" href="{html.escape(url)}" target="_blank" '
+                f'rel="noopener">Open ↗</a>' if url else '')
+    if url:
+        url_line = f'<div class="meta">url: <code>{html.escape(url)}</code></div>'
+    elif p.url.strip():
+        # Kept as typed, but not openable — say so instead of silently
+        # dropping the Open button.
+        url_line = (f'<div class="meta">url: <code>{html.escape(p.url.strip())}</code>'
+                    f'<span class="bad">invalid URL</span></div>')
+    else:
+        url_line = ''
+    spec = p.probe_spec()
+    if spec and not p.probe.strip():
+        probe_line = (f'<div class="meta">probe: <code>{spec[1]}</code>'
+                      f'<span class="hint"> (port, from the dashboard URL)</span></div>')
+    elif spec:
+        probe_line = (f'<div class="meta">probe: <code>{html.escape(str(spec[1]))}</code>'
+                      f'<span class="hint"> ({spec[0]})</span></div>')
+    elif p.probe.strip():
+        probe_line = (f'<div class="meta">probe: <code>{html.escape(p.probe.strip())}</code>'
+                      f'<span class="bad">invalid probe</span></div>')
+    else:
+        probe_line = ''
+    sched_line, sched_panel = _schedule_block(p, sched)
+    py_sel = ' selected' if p.kind == KIND_PYTHON else ''
+    sh_sel = '' if p.kind == KIND_PYTHON else ' selected'
+    auto_checked = ' checked' if p.auto_launch else ''
+    editor = f"""
+      <div class="editor" hidden>
+        <form method="post" action="/action">
+          <input type="hidden" name="id" value="{p.id}">
+          <label>Name
+            <input name="name" value="{html.escape(p.name)}" required>
+          </label>
+          <div class="row">
+            <label>Kind
+              <select name="kind">
+                <option value="{KIND_SHELL}"{sh_sel}>Shell command / app</option>
+                <option value="{KIND_PYTHON}"{py_sel}>Python script</option>
+              </select>
+            </label>
+            <label>Target
+              <input name="target" value="{html.escape(p.target)}" required
+                     placeholder="open -a Calculator   OR   /path/to/script.py">
+              <span class="hint">Shell command to run, or absolute path to a .py file.</span>
+            </label>
           </div>
-          <div class="meta"><span class="kind">{kind_label}</span>
-            <code>{html.escape(p.target)}</code></div>
-          {f'<div class="meta args">args: <code>{html.escape(p.args)}</code></div>' if p.args else ''}
-          {f'<div class="meta cwd">cwd: <code>{html.escape(p.cwd)}</code></div>' if p.cwd else ''}
-          {url_line}
-          {probe_line}
-          <div class="actions">
-            <form method="post" action="/action">
-              <input type="hidden" name="id" value="{p.id}">
-              {action}
-            </form>
-            {open_btn}
-            <button type="button" class="btn ghost" onclick="toggleEdit(this)">Edit</button>
-            <a class="btn ghost" href="/log?id={p.id}" target="_blank">Logs</a>
-            <form method="post" action="/action"
-                  onsubmit="return confirm('Remove {html.escape(p.name)}?');">
-              <input type="hidden" name="id" value="{p.id}">
-              <button name="action" value="remove" class="btn danger">Remove</button>
-            </form>
+          <div class="row">
+            <label>Arguments <span class="hint">(optional)</span>
+              <input name="args" value="{html.escape(p.args)}" placeholder="--flag value">
+            </label>
+            <label>Working dir <span class="hint">(optional)</span>
+              <input name="cwd" value="{html.escape(p.cwd)}" placeholder="/path/to/dir">
+            </label>
           </div>
-          {editor}
-        </div>""")
+          <label>Dashboard URL <span class="hint">(optional)</span>
+            <input name="url" value="{html.escape(p.url)}" placeholder="http://127.0.0.1:8501">
+            <span class="hint">Leave empty to remove the Open button.</span>
+          </label>
+          <label>Liveness probe <span class="hint">(optional)</span>
+            <input name="probe" value="{html.escape(p.probe)}"
+                   placeholder="8787   OR   match:Stats.app/Contents/MacOS/Stats">
+            <span class="hint">{PROBE_HINT}</span>
+          </label>
+          <div class="editor-actions">
+            <button name="action" value="edit" class="btn submit">Save changes</button>
+            <button type="button" class="btn ghost"
+                    onclick="toggleEdit(this)">Cancel</button>
+            <span class="hint">Changes apply to the next launch; restart a
+              running program to pick them up.</span>
+          </div>
+        </form>
+      </div>"""
+    return f"""
+    <div class="card" data-id="{p.id}">
+      <div class="card-head">
+        <span class="name">{html.escape(p.name)}</span>
+        {badge}
+        <form method="post" action="/action" class="autoform">
+          <input type="hidden" name="id" value="{p.id}">
+          <input type="hidden" name="action" value="set_auto">
+          <label class="toggle" title="Launch this program when the navigator starts">
+            <input type="checkbox" name="auto"
+                   onchange="this.form.requestSubmit()"{auto_checked}>
+            <span>Auto launch</span>
+          </label>
+        </form>
+      </div>
+      <div class="meta"><span class="kind">{kind_label}</span>
+        <code>{html.escape(p.target)}</code></div>
+      {f'<div class="meta args">args: <code>{html.escape(p.args)}</code></div>' if p.args else ''}
+      {f'<div class="meta cwd">cwd: <code>{html.escape(p.cwd)}</code></div>' if p.cwd else ''}
+      {url_line}
+      {probe_line}
+      {sched_line}
+      <div class="actions">
+        <form method="post" action="/action">
+          <input type="hidden" name="id" value="{p.id}">
+          {action}
+        </form>
+        {open_btn}
+        <button type="button" class="btn ghost" onclick="toggleEdit(this)">Edit</button>
+        <button type="button" class="btn ghost" onclick="toggleSched(this)">⏰ Schedule</button>
+        <a class="btn ghost" href="/log?id={p.id}" target="_blank">Logs</a>
+        <form method="post" action="/action"
+              onsubmit="return confirm('Remove {html.escape(p.name)}?');">
+          <input type="hidden" name="id" value="{p.id}">
+          <button name="action" value="remove" class="btn danger">Remove</button>
+        </form>
+      </div>
+      {editor}
+      {sched_panel}
+    </div>"""
+
+
+def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
+    rows = [_card(p, procs, sched) for p in config.programs]
 
     empty = '' if config.programs else '<p class="empty">No mini programs yet — add one below.</p>'
     cards = "\n".join(rows)
@@ -231,6 +371,11 @@ def _page(config: Config, procs: ProcessManager) -> str:
   .card {{ border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
           border-radius: 12px; padding: 16px; background: color-mix(in srgb, CanvasText 3%, Canvas); }}
   .card-head {{ display:flex; align-items:center; gap:10px; }}
+  /* Brief confirmation that an in-page edit landed, in place of the reload
+     that used to be the only sign anything happened. */
+  .card.saved {{ border-color: color-mix(in srgb, #1f8f4d 55%, transparent);
+                box-shadow: 0 0 0 3px #1f8f4d1f; }}
+  .card {{ transition: border-color .25s ease, box-shadow .25s ease; }}
   .name {{ font-weight: 620; font-size: 15px; }}
   .badge {{ font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }}
   .badge.run {{ background:#1f8f4d22; color:#1f8f4d; }}
@@ -251,6 +396,32 @@ def _page(config: Config, procs: ProcessManager) -> str:
             border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }}
   .editor form {{ display: grid; gap: 12px; }}
   .editor-actions {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
+  .sched-panel {{ margin-top: 12px; padding-top: 12px;
+                 border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }}
+  .sched-title {{ font-size: 13px; font-weight: 620; margin-bottom: 10px; }}
+  .sched-title .hint {{ display: block; font-weight: 400; margin-top: 3px; }}
+  .rule {{ display: grid; gap: 8px; padding: 10px; margin-bottom: 8px; border-radius: 10px;
+          border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+          background: color-mix(in srgb, CanvasText 3%, Canvas); }}
+  .rule.adding {{ border-style: dashed; background: transparent; }}
+  .rule-top {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
+  .rule-top select, .rule-top input[type="time"] {{ padding: 5px 8px; font-size: 13px; }}
+  .until {{ display: inline-flex; align-items: center; gap: 6px; }}
+  .until[hidden] {{ display: none; }}
+  .arrow {{ color: color-mix(in srgb, CanvasText 45%, transparent); }}
+  .rule-days {{ display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }}
+  .day {{ display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+         font-weight: 500; padding: 3px 8px; border-radius: 999px; cursor: pointer;
+         border: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }}
+  .day input {{ margin: 0; accent-color: #2563eb; }}
+  .day:has(input:checked) {{ border-color: color-mix(in srgb, #2563eb 55%, transparent);
+                            background: #2563eb14; }}
+  .presets {{ display: inline-flex; gap: 4px; margin-left: auto; }}
+  .presets button {{ font: inherit; font-size: 11.5px; padding: 3px 8px; border-radius: 7px;
+                    cursor: pointer; background: transparent; color: CanvasText;
+                    border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); }}
+  .rule-actions {{ display: flex; gap: 8px; }}
+  .rule-actions .btn {{ padding: 5px 11px; font-size: 12.5px; }}
   .bad {{ font-size: 11px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
          background:#c0392b22; color:#c0392b; }}
   .actions {{ display:flex; gap:8px; margin-top: 12px; align-items:center; }}
@@ -329,20 +500,95 @@ def _page(config: Config, procs: ProcessManager) -> str:
     if (!editor.hidden) editor.querySelector('input')?.focus();
   }}
 
-  // Live-refresh running badges without a full reload.
-  async function poll() {{
-    // Never reload out from under a half-typed edit.
-    if (document.querySelector('.editor:not([hidden])')) return;
+  function toggleSched(btn) {{
+    const panel = btn.closest('.card').querySelector('.sched-panel');
+    panel.hidden = !panel.hidden;
+  }}
+
+  // The stop time belongs to "Launch & stop" rules only.
+  function syncUntil(select) {{
+    const until = select.closest('.rule-top').querySelector('.until');
+    until.hidden = select.value !== '{ACTION_WINDOW}';
+  }}
+
+  // Preset buttons just tick the day boxes; the days themselves are what's saved.
+  const DAY_SETS = {{ all: [0,1,2,3,4,5,6], week: [0,1,2,3,4], end: [5,6], none: [] }};
+  function setDays(btn, which) {{
+    const want = DAY_SETS[which];
+    btn.closest('form').querySelectorAll('input[name="days"]')
+       .forEach(b => {{ b.checked = want.includes(Number(b.value)); }});
+  }}
+
+  // Schedule edits and the auto-launch toggle re-render just their own card,
+  // so the panel stays open, the page keeps its scroll, and a run of edits
+  // doesn't fight a full reload each time.
+  document.addEventListener('submit', ev => {{
+    const form = ev.target;
+    if (form.matches('.rule, .autoform')) inlineSubmit(ev, form);
+  }});
+
+  async function inlineSubmit(ev, form) {{
+    ev.preventDefault();
+    const card = form.closest('.card');
+    const body = new URLSearchParams(new FormData(form));
+    // A button's own name/value isn't in FormData — that's what says which
+    // action was pressed (Save vs Remove vs Add rule).
+    if (ev.submitter && ev.submitter.name) {{
+      body.append(ev.submitter.name, ev.submitter.value);
+    }}
+    const wasOpen = !card.querySelector('.sched-panel').hidden;
     try {{
-      const r = await fetch('/api/status');
-      const s = await r.json();
-      document.querySelectorAll('.card').forEach(c => {{
-        const running = s[c.dataset.id];
-        const b = c.querySelector('.badge');
-        if (!b) return;
-        const wasRunning = b.classList.contains('run');
-        if (running !== wasRunning) location.reload();  // action changed -> refresh buttons
+      const r = await fetch('/action', {{
+        method: 'POST', headers: {{'X-Fragment': '1'}}, body
       }});
+      if (!r.ok) throw new Error(r.status);
+      const holder = document.createElement('div');
+      holder.innerHTML = (await r.text()).trim();
+      const fresh = holder.firstElementChild;
+      if (!fresh) {{ card.remove(); return; }}
+      card.replaceWith(fresh);
+      if (wasOpen) fresh.querySelector('.sched-panel').hidden = false;
+      fresh.classList.add('saved');
+      setTimeout(() => fresh.classList.remove('saved'), 700);
+    }} catch (e) {{
+      form.submit();   // fall back to the plain full-page post
+    }}
+  }}
+
+  // A card is being edited if its editor or schedule panel is open. Such a card
+  // is left alone by the poll — but only that card, so one open panel can't
+  // freeze the running status of everything else on the page.
+  function isEditing(card) {{
+    return !!card.querySelector('.editor:not([hidden]), .sched-panel:not([hidden])');
+  }}
+
+  async function refreshCard(card) {{
+    const r = await fetch('/card?id=' + encodeURIComponent(card.dataset.id));
+    if (r.status === 404) {{ card.remove(); return; }}   // removed elsewhere
+    if (!r.ok) return;
+    const holder = document.createElement('div');
+    holder.innerHTML = (await r.text()).trim();
+    if (holder.firstElementChild) card.replaceWith(holder.firstElementChild);
+  }}
+
+  // Keep running status live. Each card is refreshed on its own, so the page
+  // never reloads out from under a half-typed edit.
+  async function poll() {{
+    try {{
+      const s = await (await fetch('/api/status')).json();
+      const cards = [...document.querySelectorAll('.card')];
+      // A program added or removed in another tab changes the set of ids;
+      // that needs the whole page, so only do it when nothing is being edited.
+      const known = cards.map(c => c.dataset.id).sort().join();
+      if (known !== Object.keys(s).sort().join()) {{
+        if (!cards.some(isEditing)) location.reload();
+        return;
+      }}
+      for (const c of cards) {{
+        const badge = c.querySelector('.badge');
+        if (!badge || isEditing(c)) continue;
+        if (s[c.dataset.id] !== badge.classList.contains('run')) await refreshCard(c);
+      }}
     }} catch (e) {{}}
   }}
   setInterval(poll, 3000);
@@ -353,9 +599,11 @@ def _page(config: Config, procs: ProcessManager) -> str:
 class DashboardServer:
     """Owns the HTTP server thread and the shared config/process state."""
 
-    def __init__(self, config: Config, procs: ProcessManager, port: int = 8765):
+    def __init__(self, config: Config, procs: ProcessManager, sched: Scheduler,
+                 port: int = 8765):
         self.config = config
         self.procs = procs
+        self.sched = sched
         self.port = port
         self._httpd = None
         self._thread = None
@@ -384,15 +632,38 @@ class DashboardServer:
                 self.send_header("Location", "/")
                 self.end_headers()
 
-            def _read_form(self):
+            def _done(self, program_id: str):
+                """Answer a POST: one card back for an in-page edit, otherwise
+                the usual redirect so the form still works without JavaScript."""
+                if not self.headers.get("X-Fragment"):
+                    self._redirect_home()
+                    return
+                prog = server.config.get(program_id)
+                # An empty body means the program is gone; the page drops the card.
+                body = (_card(prog, server.procs, server.sched)
+                        if prog else "").encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _read_form_multi(self):
+                """Every field with all its values — day checkboxes repeat a name."""
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8")
-                return {k: v[0] for k, v in parse_qs(body).items()}
+                return parse_qs(body)
+
+            def _read_form(self, raw=None):
+                raw = self._read_form_multi() if raw is None else raw
+                return {k: v[0] for k, v in raw.items()}
 
             def do_GET(self):
                 parsed = urlparse(self.path)
                 if parsed.path == "/":
-                    body = _page(server.config, server.procs).encode("utf-8")
+                    body = _page(server.config, server.procs,
+                                 server.sched).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.end_headers()
@@ -402,6 +673,21 @@ class DashboardServer:
                     body = json.dumps(status).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif parsed.path == "/card":
+                    # One program's card, for refreshing it in place.
+                    qs = parse_qs(parsed.query)
+                    prog = server.config.get(qs.get("id", [""])[0])
+                    if prog is None:
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    body = _card(prog, server.procs, server.sched).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
                 elif parsed.path == "/log":
@@ -446,7 +732,8 @@ class DashboardServer:
                         ))
                     self._redirect_home()
                 elif self.path == "/action":
-                    form = self._read_form()
+                    raw = self._read_form_multi()
+                    form = self._read_form(raw)
                     prog = server.config.get(form.get("id", ""))
                     action = form.get("action")
                     if prog:
@@ -478,10 +765,23 @@ class DashboardServer:
                             # Unchecked boxes aren't submitted at all.
                             prog.auto_launch = bool(form.get("auto"))
                             server.config.save()
+                        elif action == "add_schedule":
+                            prog.schedules.append(_schedule_from_form(form, raw))
+                            server.config.save()
+                        elif action == "save_schedule":
+                            rule = prog.get_schedule(form.get("sid", ""))
+                            if rule:
+                                _apply_schedule_form(rule, form, raw)
+                                server.config.save()
+                        elif action == "remove_schedule":
+                            rule = prog.get_schedule(form.get("sid", ""))
+                            if rule:
+                                prog.schedules.remove(rule)
+                                server.config.save()
                         elif action == "remove":
                             server.procs.stop(prog)
                             server.config.remove(prog.id)
-                    self._redirect_home()
+                    self._done(form.get("id", ""))
                 else:
                     self.send_response(404)
                     self.end_headers()

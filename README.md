@@ -20,11 +20,51 @@ in a local web dashboard opened from the menu.
   arguments, working dir, dashboard URL and probe in place
 - ⚡️ Per-program **Auto launch** toggle (off by default) — flagged programs
   start with the navigator
+- ⏰ Per-program **schedule** — launch and stop at set times, daily, on weekdays,
+  on weekends, or on any weekdays you pick — see below
 - 🌐 Local web dashboard (stdlib only) to add/remove/manage programs
 - 🔁 Launch-at-login toggle
 - 💤 On-demand loading — the dashboard web server starts only when opened,
   keeping idle RAM low
 - 🧷 Programs keep running when you quit the app, and are re-adopted on relaunch
+
+## Schedules
+
+Each program can carry any number of timed rules. Press **⏰ Schedule** on a
+program's card in the dashboard to add, edit, enable/disable or delete them.
+A rule is an **action**, a **time**, and the **days** it runs on:
+
+| Action | Fires |
+|---|---|
+| **Launch & stop** | starts at the first time, stops at the second — one rule for the whole day's window |
+| **Launch only** | starts at the time |
+| **Stop only** | stops at the time |
+
+A window whose stop time is at or before its start reads as overnight, so
+*22:00 → 06:00* stops the following morning — shown as **next day** on the rule.
+
+Days are picked as seven checkboxes with one-click presets:
+
+| Preset | Days |
+|---|---|
+| Daily | every day |
+| Weekdays | Mon–Fri |
+| Weekend | Sat, Sun |
+| *(pick your own)* | e.g. Mon, Wed, Fri — or a single day for a weekly rule |
+
+So a typical working day is one rule: *Run 09:00 → 18:30 · weekdays*. The card
+shows every rule plus the next end due, and the program's menu bar submenu shows
+an **⏰ Next:** line.
+
+Times are local, and rules survive sleep sensibly: a slot missed because the Mac
+was asleep or the navigator was restarting still fires up to **15 minutes** late,
+and is skipped after that rather than running at a surprising hour. Each end of
+a rule is remembered separately in `~/.mini_app_navigator/schedule_state.json`,
+so restarting inside that window doesn't repeat one, and a missed launch doesn't
+swallow its stop. Every firing is written to the program's own log.
+
+A rule with no days ticked, or an unusable time, is kept but marked **never
+fires** rather than being silently dropped.
 
 ## Liveness probes
 
