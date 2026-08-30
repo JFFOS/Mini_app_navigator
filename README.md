@@ -1,19 +1,21 @@
 # Mini App Navigator
 
-A lightweight macOS **menu bar app** to launch and manage your "mini programs" —
-small Python scripts or shell commands — from one place.
+A lightweight **menu bar / system-tray app** to launch and manage your "mini
+programs" — small Python scripts or shell commands — from one place. Runs on
+**macOS** (menu bar, via rumps) and **Windows** (system tray, via pystray).
 
 Each registered program gets a submenu with **Launch / Stop / View Log** actions
-and a checkmark while it's running. Adding, removing, and full management happen
-in a local web dashboard opened from the menu, split into three tabs —
-**Programs**, **Groups** and **Schedules**.
+and a running marker. Adding, removing, and full management happen in a local
+web dashboard opened from the menu, split into three tabs — **Programs**,
+**Groups** and **Schedules**.
 
 ## Features
 
-- 🚀 Menu bar launcher for Python scripts and shell commands
+- 🚀 Menu bar (macOS) / system-tray (Windows) launcher for Python scripts and
+  shell commands
 - ▶️ Launch / stop programs and see live running status
 - 📄 Per-program log files with a live-tailing web log viewer
-- 🔗 Optional dashboard URL per program — an **Open** button (menu bar and web
+- 🔗 Optional dashboard URL per program — an **Open** button (menu and web
   dashboard) opens the program's own web UI in your default browser
 - 🩺 Optional **liveness probe** per program, for commands that only *launch*
   something and exit — see below
@@ -23,9 +25,9 @@ in a local web dashboard opened from the menu, split into three tabs —
   start with the navigator
 - ⏰ Per-program **schedule** — launch and stop at set times, daily, on weekdays,
   on weekends, or on any weekdays you pick — see below
-- 🗂 **Groups** — collapse a set of programs into one menu bar entry that
-  launches, stops and restarts all of them together, and hide a whole group
-  from the menu when you only manage it from the dashboard — see below
+- 🗂 **Groups** — collapse a set of programs into one menu entry that launches,
+  stops and restarts all of them together, and hide a whole group from the menu
+  when you only manage it from the dashboard — see below
 - 🌐 Local web dashboard (stdlib only), tabbed into Programs / Groups / Schedules
 - 🔁 Launch-at-login toggle
 - 💤 On-demand loading — the dashboard web server starts only when opened,
@@ -60,11 +62,13 @@ where the whole set can be seen at once. A program belongs to exactly one group,
 so ticking one that currently sits in another *moves* it — the picker says which
 group that is before you do.
 
-In the **menu bar** a grouped program is no longer listed on its own: the group
+In the **menu** a grouped program is no longer listed on its own: the group
 takes its place as a single entry, with
 
 - **Launch All / Stop All / Restart All** for everything in it at once,
-- a checkmark when every member is running and a dash when only some are,
+- a running marker when every member is up, and a partial one when only some
+  are (a checkmark and a dash on macOS; a `✓` and a `◐` prefix on Windows,
+  where a tray item can't carry both a checkmark and a submenu),
 - an `N of M running` line, and
 - each member still there as a submenu below, so nothing is lost by grouping.
 
@@ -77,7 +81,7 @@ group are gathered under **Ungrouped**.
 ### Show or hide in the menu
 
 Every group has a **Show in menu** checkbox in its dashboard header. Turn it off
-and the group *and its programs* disappear from the menu bar entirely, while
+and the group *and its programs* disappear from the menu entirely, while
 staying fully manageable — and fully scheduled — from the dashboard. That keeps
 the menu to the things you actually launch by hand, without ungrouping or
 deleting anything.
@@ -109,11 +113,12 @@ Days are picked as seven checkboxes with one-click presets:
 | *(pick your own)* | e.g. Mon, Wed, Fri — or a single day for a weekly rule |
 
 So a typical working day is one rule: *Run 09:00 → 18:30 · weekdays*. The
-program's card digests its rules to one line, and its menu bar submenu shows an
+program's card digests its rules to one line, and its menu submenu shows an
 **⏰ Next:** line.
 
-Times are local, and rules survive sleep sensibly: a slot missed because the Mac
-was asleep or the navigator was restarting still fires up to **15 minutes** late,
+Times are local, and rules survive sleep sensibly: a slot missed because the
+machine was asleep or the navigator was restarting still fires up to **15
+minutes** late,
 and is skipped after that rather than running at a surprising hour. Each end of
 a rule is remembered separately in `~/.mini_app_navigator/schedule_state.json`,
 so restarting inside that window doesn't repeat one, and a missed launch doesn't
@@ -125,8 +130,9 @@ fires** rather than being silently dropped.
 ## Liveness probes
 
 Status is normally tracked by the PID of the command that was launched. That
-breaks for a target that is only a *launcher* — `open -a Stats.app`, or a script
-ending in `nohup … &` — because it hands off to a detached process and exits
+breaks for a target that is only a *launcher* — `open -a Stats.app`,
+`start "" foo.exe`, or a script ending in `nohup … &` — because it hands off to
+a detached process and exits
 immediately. The navigator would show **stopped** while the program is running,
 re-launch it on every start, and have nothing to Stop.
 
@@ -137,7 +143,7 @@ process, adopt it, and manage it normally:
 |---|---|
 | *(empty)* | the port of the program's dashboard URL, if that URL is a local one |
 | `8787` (or `port:8787`) | a process listening on that local port |
-| `match:shortcutguard_app.py` | `pgrep -f` against the full command line |
+| `match:shortcutguard_app.py` | text in the full command line (`pgrep -f` on macOS, a WMI query on Windows) |
 
 So a program with a `http://127.0.0.1:8787/` dashboard URL needs no probe at
 all — the URL is the probe. Fill the field in only to override that, or for a
@@ -147,11 +153,34 @@ Adopted processes are shown with a **via probe** badge in the dashboard, and are
 stopped on their own (not as a process group), since the navigator didn't create
 that group.
 
+## Platform support
+
+The app is one codebase with a per-platform front end, picked automatically at
+import time (`app.py` → `app_mac.py` or `app_win.py`). Everything below the UI —
+config, process management, scheduling, the dashboard — is shared.
+
+| | macOS | Windows |
+|---|---|---|
+| Front end | menu bar, [`rumps`](https://pypi.org/project/rumps/) | system tray, [`pystray`](https://pypi.org/project/pystray/) + [`Pillow`](https://pypi.org/project/Pillow/) |
+| Running marker | checkmark on the item | `✓` prefix on the label |
+| Menu refresh | timer, every 3s | rebuilt each time the menu opens |
+| Launch at login | LaunchAgent plist | `HKCU\...\CurrentVersion\Run` registry value |
+| Stopping a program | `SIGTERM` to the process group | `taskkill /T /F` on the process tree |
+| Probe by port | `lsof` | `netstat -ano` |
+| Probe by `match:` | `pgrep -f` | `Get-CimInstance Win32_Process` |
+
+Only the running marker differs visibly: a Windows tray item can't carry both a
+checkmark and a submenu, so the mark moves into the label. The Windows menu also
+has no **Refresh** entry, because it is rebuilt from live state every time it
+opens.
+
 ## Requirements
 
-- macOS
+- macOS or Windows
 - Python 3.8+
-- [`rumps`](https://pypi.org/project/rumps/)
+- macOS: [`rumps`](https://pypi.org/project/rumps/)
+- Windows: [`pystray`](https://pypi.org/project/pystray/) and
+  [`Pillow`](https://pypi.org/project/Pillow/)
 
 ## Install
 
@@ -159,16 +188,29 @@ that group.
 pip install -r requirements.txt
 ```
 
+The requirements are platform-marked, so this installs only what your OS needs.
+
 ## Run
 
 ```bash
 python mini_app_navigator.py
 ```
 
-Or use the included **Start**, **Stop**, and **Restart Mini App
-Navigator.command** launchers.
+Or use the included double-click launchers — **Start**, **Stop** and **Restart
+Mini App Navigator**, as `.command` files on macOS and `.bat` files on Windows.
 
-Configuration and logs live under `~/.mini_app_navigator/`.
+To make the launchers use a specific interpreter (a conda env or a venv, rather
+than whatever is on `PATH`), copy the example local config and edit it:
+
+```bash
+cp launcher.local.example launcher.local            # macOS
+copy launcher.local.bat.example launcher.local.bat  :: Windows
+```
+
+Both are gitignored, so a machine-specific path never lands in the repo.
+
+Configuration and logs live under `~/.mini_app_navigator/` (on Windows, that is
+`C:\Users\<you>\.mini_app_navigator\`).
 
 ## License
 

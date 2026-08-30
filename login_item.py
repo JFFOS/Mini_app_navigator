@@ -1,51 +1,28 @@
-"""Manage the 'Launch at Login' setting via a macOS LaunchAgent.
+"""Platform dispatcher for the 'Launch at Login' setting.
 
-Enabling writes ~/Library/LaunchAgents/com.mini-app-navigator.plist and loads
-it so launchd starts the app at login. Disabling unloads and removes it.
+Picks the macOS backend (a LaunchAgent plist, login_item_mac.py) or the
+Windows backend (a registry Run key, login_item_win.py) based on the running
+platform. Both expose is_enabled / enable / disable.
+
+On an unsupported platform the setting reads as off and can't be turned on,
+so a caller can still offer the menu entry without special-casing anything.
 """
 
-import os
-import plistlib
-import subprocess
 import sys
 
-from config import LOG_DIR
+if sys.platform == "darwin":
+    from login_item_mac import is_enabled, enable, disable
+elif sys.platform == "win32":
+    from login_item_win import is_enabled, enable, disable
+else:
+    def is_enabled() -> bool:
+        return False
 
-LABEL = "com.mini-app-navigator"
-PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
+    def enable() -> None:
+        raise RuntimeError(
+            f"Launch at Login is not supported on platform: {sys.platform}")
 
-
-def _script_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "mini_app_navigator.py")
-
-
-def is_enabled() -> bool:
-    return os.path.exists(PLIST_PATH)
-
-
-def enable() -> None:
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    plist = {
-        "Label": LABEL,
-        "ProgramArguments": [sys.executable, _script_path()],
-        "WorkingDirectory": project_dir,
-        "RunAtLoad": True,
-        "KeepAlive": False,
-        "StandardOutPath": os.path.join(LOG_DIR, "launch-agent.log"),
-        "StandardErrorPath": os.path.join(LOG_DIR, "launch-agent.log"),
-    }
-    os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
-    with open(PLIST_PATH, "wb") as f:
-        plistlib.dump(plist, f)
-    # Reload so the change takes effect immediately (ignore "not loaded" noise).
-    subprocess.run(["launchctl", "unload", PLIST_PATH], capture_output=True)
-    subprocess.run(["launchctl", "load", PLIST_PATH], capture_output=True)
-
-
-def disable() -> None:
-    subprocess.run(["launchctl", "unload", PLIST_PATH], capture_output=True)
-    try:
-        os.remove(PLIST_PATH)
-    except OSError:
+    def disable() -> None:
         pass
+
+__all__ = ["is_enabled", "enable", "disable"]

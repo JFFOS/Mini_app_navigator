@@ -1,0 +1,18 @@
+@echo off
+rem Local launcher config -- copy this file to "launcher.local.bat" (which is
+rem gitignored) and set PYTHONW to the interpreter that has this project's
+rem dependencies (pystray, Pillow) installed. The .bat launchers call it.
+rem
+rem If you skip this, the launchers fall back to whatever pythonw.exe is on
+rem PATH.
+rem
+rem Use pythonw.exe rather than python.exe: it starts the app without leaving
+rem a console window open behind the tray icon.
+rem
+rem Conda env example:
+rem   set "PYTHONW=%USERPROFILE%\anaconda3\envs\mini-app-navigator\pythonw.exe"
+rem
+rem venv example:
+rem   set "PYTHONW=%~dp0.venv\Scripts\pythonw.exe"
+
+set "PYTHONW="

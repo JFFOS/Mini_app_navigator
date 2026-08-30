@@ -14,6 +14,7 @@ second place to press the same thing.
 import html
 import json
 import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -26,10 +27,25 @@ from scheduler import Scheduler
 
 LOG_TAIL_BYTES = 40_000
 
+# The form is filled in by hand, so its examples have to be examples the
+# reader could actually type on the machine they're looking at.
+if sys.platform == "win32":
+    TARGET_EXAMPLE = "notepad.exe   OR   C:\\path\\to\\script.py"
+    CWD_EXAMPLE = "C:\\path\\to\\dir"
+    PROBE_EXAMPLE = "8787   OR   match:obsidian.exe"
+    LAUNCHER_EXAMPLE = "<code>start &quot;&quot; foo.exe</code>"
+    MENU_NAME = "tray menu"
+else:
+    TARGET_EXAMPLE = "open -a Calculator   OR   /path/to/script.py"
+    CWD_EXAMPLE = "/path/to/dir"
+    PROBE_EXAMPLE = "8787   OR   match:Stats.app/Contents/MacOS/Stats"
+    LAUNCHER_EXAMPLE = "<code>open -a Foo.app</code>"
+    MENU_NAME = "menu bar"
+
 # Shown under the probe field in both the add and the edit form.
 PROBE_HINT = (
     "Needed when the target only <em>launches</em> the program and exits "
-    "(<code>open -a Foo.app</code>, or a script that backgrounds itself) — "
+    f"({LAUNCHER_EXAMPLE}, or a script that backgrounds itself) — "
     "without it the navigator reports stopped while the program is up. "
     "A port number, or <code>match:</code> plus text from the real process's "
     "command line. Leave empty and a local dashboard URL above is used as the "
@@ -425,7 +441,7 @@ def _card(p: Program, procs: ProcessManager, sched: Scheduler,
             </label>
             <label>Target
               <input name="target" value="{html.escape(p.target)}" required
-                     placeholder="open -a Calculator   OR   /path/to/script.py">
+                     placeholder="{TARGET_EXAMPLE}">
               <span class="hint">Shell command to run, or absolute path to a .py file.</span>
             </label>
           </div>
@@ -434,7 +450,7 @@ def _card(p: Program, procs: ProcessManager, sched: Scheduler,
               <input name="args" value="{html.escape(p.args)}" placeholder="--flag value">
             </label>
             <label>Working dir <span class="hint">(optional)</span>
-              <input name="cwd" value="{html.escape(p.cwd)}" placeholder="/path/to/dir">
+              <input name="cwd" value="{html.escape(p.cwd)}" placeholder="{CWD_EXAMPLE}">
             </label>
           </div>
           <label>Dashboard URL <span class="hint">(optional)</span>
@@ -443,7 +459,7 @@ def _card(p: Program, procs: ProcessManager, sched: Scheduler,
           </label>
           <label>Liveness probe <span class="hint">(optional)</span>
             <input name="probe" value="{html.escape(p.probe)}"
-                   placeholder="8787   OR   match:Stats.app/Contents/MacOS/Stats">
+                   placeholder="{PROBE_EXAMPLE}">
             <span class="hint">{PROBE_HINT}</span>
           </label>
           <div class="editor-actions">
@@ -839,7 +855,7 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
       </label>
       <label>Target
         <input name="target" required
-               placeholder="open -a Calculator   OR   /path/to/script.py">
+               placeholder="{TARGET_EXAMPLE}">
         <span class="hint">Shell command to run, or absolute path to a .py file.</span>
       </label>
     </div>
@@ -848,7 +864,7 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
         <input name="args" placeholder="--flag value">
       </label>
       <label>Working dir <span class="hint">(optional)</span>
-        <input name="cwd" placeholder="/path/to/dir">
+        <input name="cwd" placeholder="{CWD_EXAMPLE}">
       </label>
     </div>
     <label>Group <span class="hint">(optional)</span>
@@ -858,10 +874,10 @@ def _page(config: Config, procs: ProcessManager, sched: Scheduler) -> str:
     <label>Dashboard URL <span class="hint">(optional)</span>
       <input name="url" placeholder="http://127.0.0.1:8501">
       <span class="hint">If the program serves its own web UI, an Open button
-        appears here and in the menu bar submenu.</span>
+        appears here and in the {MENU_NAME} submenu.</span>
     </label>
     <label>Liveness probe <span class="hint">(optional)</span>
-      <input name="probe" placeholder="8787   OR   match:Stats.app/Contents/MacOS/Stats">
+      <input name="probe" placeholder="{PROBE_EXAMPLE}">
       <span class="hint">{PROBE_HINT}</span>
     </label>
     <label class="toggle"><input type="checkbox" name="auto">
