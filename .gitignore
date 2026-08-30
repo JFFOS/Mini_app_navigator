@@ -8,6 +8,10 @@ venv/
 # macOS
 .DS_Store
 
+# Windows
+Thumbs.db
+desktop.ini
+
 # py2app / build artifacts
 build/
 dist/
@@ -17,3 +21,4 @@ dist/
 
 # Local machine config (holds a machine-specific interpreter path)
 launcher.local
+launcher.local.bat

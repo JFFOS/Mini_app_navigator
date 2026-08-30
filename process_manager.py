@@ -6,12 +6,17 @@ that:
   * relaunching the app re-adopts the still-running processes (grabs them back).
 
 PID tracking alone can't see a program whose command is only a *launcher* —
-`open -a Foo.app`, or a script that does `nohup … &` and returns. Those hand
-off to a detached process and exit, so the PID we spawned is gone a second
-later while the program itself is up. A program can declare a liveness probe
-(a listening port, or a pgrep pattern); when the tracked PID is dead, the probe
-is consulted and the process it finds is adopted, so status, Stop and Restart
-all work on the real process.
+`open -a Foo.app`, `start "" foo.exe`, or a script that backgrounds itself and
+returns. Those hand off to a detached process and exit, so the PID we spawned is
+gone a second later while the program itself is up. A program can declare a
+liveness probe (a listening port, or a command-line pattern); when the tracked
+PID is dead, the probe is consulted and the process it finds is adopted, so
+status, Stop and Restart all work on the real process.
+
+Everything here is cross-platform, with the process primitives differing by OS:
+POSIX gets process groups, SIGTERM and pgrep/lsof; Windows gets ctypes calls
+into kernel32, `taskkill /T` and netstat/CIM queries. The rest of the app never
+sees the difference.
 
 Each program's stdout/stderr is redirected to a per-program log file so the
 menu / dashboard can show output without keeping it in memory.
@@ -20,14 +25,33 @@ menu / dashboard can show output without keeping it in memory.
 import json
 import os
 import shlex
-import signal
 import socket
 import subprocess
 import sys
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import Program, KIND_PYTHON, RUNNING_PATH, PROBE_PORT
+
+IS_WINDOWS = os.name == "nt"
+
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    # Declared explicitly: the default restype is a 32-bit int, which would
+    # truncate the 64-bit HANDLE that OpenProcess returns, and use_last_error
+    # is what makes ctypes.get_last_error() meaningful after a failed call.
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE,
+                                             ctypes.POINTER(wintypes.DWORD))
+    _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+else:
+    import signal
 
 # How long a restart waits for the old process to exit before relaunching.
 RESTART_WAIT_SECONDS = 5.0
@@ -37,6 +61,10 @@ PROBE_CACHE_SECONDS = 2.0
 # Probe helpers are local and fast; if one hangs, treat the program as down
 # rather than freezing the menu bar.
 PROBE_TIMEOUT_SECONDS = 3.0
+
+# Keep helper processes (probes, taskkill) from flashing a console window on
+# Windows — the app normally runs under pythonw.exe with no console of its own.
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
 
 
 class ProcessManager:
@@ -78,6 +106,27 @@ class ProcessManager:
     def _alive(pid: int) -> bool:
         if pid is None or pid < 0:
             return False
+        if IS_WINDOWS:
+            # os.kill(pid, 0) is not a liveness check on Windows — signal 0 is
+            # CTRL_C_EVENT there, which would actually try to signal the
+            # process. Ask the OS directly instead.
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            ERROR_ACCESS_DENIED = 5
+            handle = _kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                # Access denied means it exists but belongs to another user —
+                # the same case the POSIX branch reports as alive below.
+                # Anything else (typically ERROR_INVALID_PARAMETER) means gone.
+                return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+            try:
+                exit_code = wintypes.DWORD()
+                if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return False
+                return exit_code.value == STILL_ACTIVE
+            finally:
+                _kernel32.CloseHandle(handle)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -95,6 +144,72 @@ class ProcessManager:
             s.settimeout(0.25)
             return s.connect_ex(("127.0.0.1", port)) == 0
 
+    @staticmethod
+    def _capture(cmd: list) -> str:
+        """Run a probe helper and return its stdout, or "" if it failed."""
+        try:
+            return subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=PROBE_TIMEOUT_SECONDS, **NO_WINDOW,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    @staticmethod
+    def _pids_in(text: str) -> List[int]:
+        """Every positive integer in `text`, read as a PID."""
+        pids = []
+        for token in text.split():
+            try:
+                pid = int(token)
+            except ValueError:
+                continue
+            if pid > 0:
+                pids.append(pid)
+        return pids
+
+    def _probe_pids(self, kind: str, value) -> List[int]:
+        """PIDs matching the probe, however this platform can find them."""
+        if IS_WINDOWS:
+            return self._probe_pids_windows(kind, value)
+        if kind == PROBE_PORT:
+            cmd = ["lsof", "-ti", f"tcp:{value}", "-sTCP:LISTEN"]
+        else:
+            cmd = ["pgrep", "-f", value]
+        return self._pids_in(self._capture(cmd))
+
+    def _probe_pids_windows(self, kind: str, value) -> List[int]:
+        """The Windows stand-ins for lsof and pgrep."""
+        if kind == PROBE_PORT:
+            # netstat ships with Windows and starts far faster than a
+            # PowerShell; the PID is the last column of each LISTENING row.
+            pids = []
+            for line in self._capture(["netstat", "-ano", "-p", "tcp"]).splitlines():
+                parts = line.split()
+                if (len(parts) < 5 or parts[0].upper() != "TCP"
+                        or parts[3].upper() != "LISTENING"):
+                    continue
+                # Splitting from the right keeps IPv6 rows ("[::]:8787") whole.
+                host_port = parts[1].rsplit(":", 1)
+                if len(host_port) == 2 and host_port[1] == str(value):
+                    pids.extend(self._pids_in(parts[4]))
+            return pids
+        # There is no pgrep, so command lines come from WMI. A single-quoted
+        # PowerShell string doesn't interpolate, so doubling the quotes in the
+        # user's pattern is the whole of the escaping needed.
+        #
+        # $PID excludes the query itself: the pattern is sitting in this very
+        # command line, so without it every match: probe would find its own
+        # helper and report the program as permanently running. (pgrep leaves
+        # itself out for us on POSIX; PowerShell has no such courtesy.)
+        pattern = str(value).replace("'", "''")
+        script = ("$me = $PID; Get-CimInstance Win32_Process | "
+                  "Where-Object { $_.ProcessId -ne $me -and "
+                  f"$_.CommandLine -like '*{pattern}*' }} | "
+                  "ForEach-Object { $_.ProcessId }")
+        return self._pids_in(self._capture(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]))
+
     def _run_probe(self, spec: tuple) -> Tuple[bool, Optional[int]]:
         """Run a probe. Returns (is_alive, pid_if_identifiable).
 
@@ -103,27 +218,9 @@ class ProcessManager:
         which process" are answered separately.
         """
         kind, value = spec
-        if kind == PROBE_PORT:
-            cmd = ["lsof", "-ti", f"tcp:{value}", "-sTCP:LISTEN"]
-        else:
-            cmd = ["pgrep", "-f", value]
-        try:
-            out = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=PROBE_TIMEOUT_SECONDS,
-            ).stdout
-        except (OSError, subprocess.SubprocessError):
-            out = ""
         # Never match ourselves: a pattern loose enough to hit the navigator
         # would make every program look permanently running.
-        pids = []
-        for line in out.split():
-            try:
-                pid = int(line)
-            except ValueError:
-                continue
-            if pid != os.getpid() and pid > 0:
-                pids.append(pid)
+        pids = [pid for pid in self._probe_pids(kind, value) if pid != os.getpid()]
         if pids:
             # A loose pattern can also catch the launcher shell that's still
             # winding down; the lowest PID is the better bet for the long-lived
@@ -173,10 +270,33 @@ class ProcessManager:
         """True when the tracked process was found by a probe, not launched."""
         return bool(self._state.get(program_id, {}).get("adopted"))
 
+    @staticmethod
+    def _python_exe() -> str:
+        """The interpreter to run a program's .py file with.
+
+        The navigator itself usually runs under pythonw.exe, which has no
+        console and no usable standard streams. A launched script wants the
+        console build next to it instead — its output is redirected to the log
+        file, and CREATE_NO_WINDOW keeps the console itself from appearing.
+        """
+        if IS_WINDOWS and os.path.basename(sys.executable).lower() == "pythonw.exe":
+            console = os.path.join(os.path.dirname(sys.executable), "python.exe")
+            if os.path.exists(console):
+                return console
+        return sys.executable
+
     def _build_command(self, program: Program):
         """Return (args_or_cmd, use_shell) for subprocess."""
-        extra = shlex.split(program.args) if program.args else []
         if program.kind == KIND_PYTHON:
+            if IS_WINDOWS:
+                # A command line string rather than a list, so Windows applies
+                # its own parsing rules: shlex reads the backslashes in
+                # `C:\path\to` as escapes and would silently eat them.
+                line = f'"{self._python_exe()}" "{program.target}"'
+                if program.args:
+                    line += " " + program.args
+                return line, False
+            extra = shlex.split(program.args) if program.args else []
             return [sys.executable, program.target, *extra], False
         cmd = program.target
         if program.args:
@@ -195,6 +315,15 @@ class ProcessManager:
         if cwd and not os.path.isdir(cwd):
             return f"Working directory not found: {cwd}"
 
+        # Detach the child so it outlives us quitting. POSIX: its own session.
+        # Windows: its own process group (which is what lets `taskkill /T` find
+        # the whole tree later) and no console window of its own.
+        if IS_WINDOWS:
+            detach = {"creationflags": (subprocess.CREATE_NEW_PROCESS_GROUP
+                                        | subprocess.CREATE_NO_WINDOW)}
+        else:
+            detach = {"start_new_session": True}
+
         try:
             log_file = open(program.log_path(), "a", buffering=1)
             log_file.write(f"\n=== launch: {program.name} ===\n")
@@ -206,7 +335,7 @@ class ProcessManager:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                start_new_session=True,  # own process group; detaches from us
+                **detach,
             )
         except (OSError, ValueError) as e:
             return f"Failed to launch: {e}"
@@ -217,10 +346,13 @@ class ProcessManager:
             except (OSError, UnboundLocalError):
                 pass
 
-        try:
-            pgid = os.getpgid(proc.pid)
-        except OSError:
-            pgid = proc.pid
+        if IS_WINDOWS:
+            pgid = proc.pid  # no process groups to look up; taskkill walks the tree
+        else:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except OSError:
+                pgid = proc.pid
         self._state[program.id] = {"pid": proc.pid, "pgid": pgid, "adopted": False}
         self._probe_cache.pop(program.id, None)
         self._save()
@@ -254,6 +386,16 @@ class ProcessManager:
         kill.
         """
         pid = entry.get("pid", -1)
+        if IS_WINDOWS:
+            # Windows has no SIGTERM to send: taskkill is the supported way.
+            # /T takes the child tree with it, which is the counterpart of
+            # signalling a process group — so an adopted process, whose tree
+            # isn't ours, is killed on its own.
+            cmd = ["taskkill", "/PID", str(pid), "/F"]
+            if not entry.get("adopted"):
+                cmd.insert(-1, "/T")
+            subprocess.run(cmd, capture_output=True, **NO_WINDOW)
+            return
         if entry.get("adopted"):
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -335,7 +477,12 @@ class ProcessManager:
 
         Only reaps our own children; re-adopted processes from a previous app
         run are not our children and are left untouched.
+
+        POSIX-only: Windows has no zombie processes to collect, and has no
+        "wait for any child" to call — os.waitpid(-1, …) isn't supported there.
         """
+        if IS_WINDOWS:
+            return
         while True:
             try:
                 pid, _ = os.waitpid(-1, os.WNOHANG)
