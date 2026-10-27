@@ -911,8 +911,15 @@ def _schedules_page(config: Config, sched: Scheduler) -> str:
     empty = ('' if config.programs else
              '<p class="empty">No mini programs yet \u2014 add one on the '
              'Programs tab.</p>')
+    paused = ('<p class="hint lead">Schedules are <b>on</b> \u2014 rules fire '
+              'as set. Click <b>Schedules: On</b> in the menu bar to pause them '
+              'all.</p>' if config.schedules_enabled else
+              '<p class="hint lead">Schedules are <b>off</b> \u2014 no rule fires '
+              'until you click <b>Schedules: Off</b> in the menu bar to turn '
+              'them back on.</p>')
     body = f"""
   {empty}
+  {paused}
   <p class="hint lead">Times are local. A rule fires up to 15 minutes late if
     the Mac was asleep, and is skipped after that.</p>
   {rows}"""

@@ -303,6 +303,9 @@ class Config:
     def __init__(self):
         self.programs: List[Program] = []
         self.groups: List[Group] = []
+        # Master switch for every schedule rule, flipped from the menu bar.
+        # Off pauses all rules without touching them, so they come back as-is.
+        self.schedules_enabled: bool = True
         self._ensure_dirs()
         self.load()
 
@@ -314,15 +317,18 @@ class Config:
         if not os.path.exists(CONFIG_PATH):
             self.programs = []
             self.groups = []
+            self.schedules_enabled = True
             return
         try:
             with open(CONFIG_PATH, "r") as f:
                 data = json.load(f)
             self.programs = [Program.from_dict(d) for d in data.get("programs", [])]
             self.groups = [Group.from_dict(d) for d in data.get("groups", [])]
+            self.schedules_enabled = bool(data.get("schedules_enabled", True))
         except (json.JSONDecodeError, OSError):
             self.programs = []
             self.groups = []
+            self.schedules_enabled = True
         # A config edited by hand (or written by an older version) can name a
         # group that isn't there; such a program is ungrouped rather than
         # invisible in a group that never renders.
@@ -337,6 +343,7 @@ class Config:
             json.dump({
                 "programs": [p.to_dict() for p in self.programs],
                 "groups": [g.to_dict() for g in self.groups],
+                "schedules_enabled": self.schedules_enabled,
             }, f, indent=2)
 
     def add(self, program: Program):

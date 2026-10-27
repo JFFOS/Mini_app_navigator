@@ -122,6 +122,11 @@ swallow its stop. Every firing is written to the program's own log.
 A rule with no days ticked, or an unusable time, is kept but marked **never
 fires** rather than being silently dropped.
 
+To pause every rule at once — for a holiday, say — click **Schedules: On** in
+the menu bar menu; it then reads **Schedules: Off (all paused)** until clicked
+again, and the Schedules tab says which state you're in. Rules are left as they are; slots that come due while paused
+are skipped (and logged as such) rather than fired later when you turn it back on.
+
 ## Liveness probes
 
 Status is normally tracked by the PID of the command that was launched. That

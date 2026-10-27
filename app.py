@@ -77,6 +77,7 @@ class MiniAppNavigator(rumps.App):
                 for p in self.config.programs
             ),
             tuple((g.id, g.name, g.show_in_menu) for g in self.config.groups),
+            self.config.schedules_enabled,
         )
 
     def _build_menu(self):
@@ -104,6 +105,14 @@ class MiniAppNavigator(rumps.App):
         login = rumps.MenuItem("Launch at Login", callback=self.on_toggle_login)
         login.state = 1 if login_item.is_enabled() else 0
         items.append(login)
+        # The label spells out the current state, so it reads correctly even to
+        # someone who doesn't notice (or trust) the checkmark.
+        on = self.config.schedules_enabled
+        schedules = rumps.MenuItem(
+            "Schedules: On" if on else "Schedules: Off (all paused)",
+            callback=self.on_toggle_schedules)
+        schedules.state = 1 if on else 0
+        items.append(schedules)
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Refresh", callback=lambda _: self._refresh(None)))
         items.append(rumps.MenuItem("Restart Navigator", callback=self.on_restart_self))
@@ -166,7 +175,9 @@ class MiniAppNavigator(rumps.App):
         parent.add(detail)
         summary = self.scheduler.summary(program)
         if summary:
-            upcoming = rumps.MenuItem(f"⏰ Next: {summary}")
+            upcoming = rumps.MenuItem("⏰ Schedules paused"
+                                      if not self.config.schedules_enabled
+                                      else f"⏰ Next: {summary}")
             upcoming.set_callback(None)
             parent.add(upcoming)
         return parent
@@ -233,6 +244,13 @@ class MiniAppNavigator(rumps.App):
         else:
             login_item.enable()
             sender.state = 1
+
+    def on_toggle_schedules(self, _):
+        # Pauses every rule at once — for a holiday, say — without editing or
+        # disabling any of them one by one.
+        self.config.schedules_enabled = not self.config.schedules_enabled
+        self.config.save()
+        self._build_menu()
 
     def on_restart_self(self, _):
         """Relaunch the menu bar app itself, leaving launched programs running.

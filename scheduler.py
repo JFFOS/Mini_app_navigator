@@ -179,7 +179,15 @@ class Scheduler:
             for schedule in list(program.schedules):
                 live_ids.add(schedule.id)
                 for phase, action, slot in self._due_slots(schedule, now):
-                    self._fire(program, action, slot)
+                    # While paused, a due slot is still marked as fired: it is
+                    # skipped, not deferred, so turning schedules back on can't
+                    # set off whatever came due in the last 15 minutes.
+                    if self._config.schedules_enabled:
+                        self._fire(program, action, slot)
+                    else:
+                        self._log(program, f"=== scheduled {action} "
+                                           f"({slot.strftime('%a %H:%M')}): "
+                                           f"skipped, schedules paused ===")
                     self._fired[self._fired_key(schedule, phase)] = slot.isoformat()
                     changed = True
         if self._forget_removed(live_ids) or changed:
@@ -212,6 +220,8 @@ class Scheduler:
         active: List[Schedule] = [s for s in program.schedules if s.is_active()]
         if not active:
             return ""
+        if not self._config.schedules_enabled:
+            return "paused"
         upcoming = self.next_run(program)
         if upcoming is None:
             return " · ".join(s.label() for s in active)
